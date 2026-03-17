@@ -12,7 +12,8 @@ import sys
 from .compiler import compile_catalog
 
 
-VERSION = "1.0.0"
+BUNDLE_VERSION = "24506"
+SHORT_BUNDLE_VERSION = "26.3"
 
 
 def _output_plist(data: dict, fmt: str):
@@ -54,7 +55,7 @@ def main():
         prog="actool",
         description="Compiles, prints, updates, and verifies asset catalogs.")
 
-    parser.add_argument("document", help="Path to .xcassets document")
+    parser.add_argument("document", nargs="?", help="Path to .xcassets document")
 
     # Output format
     parser.add_argument("--output-format", default="xml1",
@@ -120,16 +121,20 @@ def main():
 
     args = parser.parse_args()
 
-    # Handle --version
+    # Handle --version (no document required)
     if args.version:
         version_data = {
             "com.apple.actool.version": {
-                "bundle-version": VERSION,
-                "short-bundle-version": VERSION,
+                "bundle-version": BUNDLE_VERSION,
+                "short-bundle-version": SHORT_BUNDLE_VERSION,
             }
         }
         _output_plist(version_data, args.output_format)
         return
+
+    # All remaining commands require a document
+    if not args.document:
+        parser.error("a document path is required")
 
     # Handle --print-contents (without --compile)
     if args.print_contents and not args.compile:
