@@ -292,3 +292,124 @@ class AssetCatalog:
             result.append((str(img_path), pixel_size, scale))
 
         return result
+
+
+def list_catalog_contents(xcassets_path: str) -> dict:
+    """List the contents of an xcassets catalog as a tree structure.
+
+    Returns a dict matching Apple's --print-contents plist format.
+    """
+    catalog_path = Path(xcassets_path)
+    children = []
+
+    for item in sorted(catalog_path.iterdir()):
+        if item.suffix == ".imageset":
+            children.append(_list_imageset(item))
+        elif item.suffix == ".appiconset":
+            children.append(_list_appiconset(item))
+
+    result = {"filename": catalog_path.name}
+    if children:
+        result["children"] = children
+    return result
+
+
+def _list_imageset(item_path: Path) -> dict:
+    """List contents of a single imageset."""
+    contents_path = item_path / "Contents.json"
+    if not contents_path.exists():
+        return {"filename": item_path.name}
+
+    with open(contents_path) as f:
+        contents = json.load(f)
+
+    props = contents.get("properties", {})
+    rendering = props.get("template-rendering-intent", "original")
+
+    image_children = []
+    for img_info in contents.get("images", []):
+        filename = img_info.get("filename")
+        if not filename:
+            continue
+        img_path = item_path / filename
+        if not img_path.exists():
+            continue
+
+        entry = {"filename": filename}
+        idiom = img_info.get("idiom")
+        if idiom:
+            entry["idiom"] = idiom
+
+        try:
+            img = Image.open(str(img_path))
+            w_pts, h_pts = _image_point_size(img)
+            entry["image"] = {"height": h_pts, "width": w_pts}
+        except Exception:
+            pass
+
+        scale = img_info.get("scale")
+        if scale:
+            entry["scale"] = scale
+
+        image_children.append(entry)
+
+    result = {"filename": item_path.name}
+    if rendering:
+        result["template-rendering-intent"] = rendering
+    if image_children:
+        result["children"] = image_children
+    return result
+
+
+def _list_appiconset(item_path: Path) -> dict:
+    """List contents of an appiconset."""
+    contents_path = item_path / "Contents.json"
+    if not contents_path.exists():
+        return {"filename": item_path.name}
+
+    with open(contents_path) as f:
+        contents = json.load(f)
+
+    image_children = []
+    for img_info in contents.get("images", []):
+        filename = img_info.get("filename")
+        if not filename:
+            continue
+        img_path = item_path / filename
+        if not img_path.exists():
+            continue
+
+        entry = {"filename": filename}
+        idiom = img_info.get("idiom")
+        if idiom:
+            entry["idiom"] = idiom
+
+        try:
+            img = Image.open(str(img_path))
+            w_pts, h_pts = _image_point_size(img)
+            entry["image"] = {"height": h_pts, "width": w_pts}
+        except Exception:
+            pass
+
+        scale = img_info.get("scale")
+        if scale:
+            entry["scale"] = scale
+        size = img_info.get("size")
+        if size:
+            entry["size"] = size
+
+        image_children.append(entry)
+
+    result = {"filename": item_path.name}
+    if image_children:
+        result["children"] = image_children
+    return result
+
+
+def _image_point_size(img: Image.Image) -> tuple[float, float]:
+    """Get image dimensions in points (72 DPI-based), matching Apple's actool."""
+    dpi = img.info.get("dpi", (72, 72))
+    w_pts = round(img.width * 72.0 / dpi[0])
+    h_pts = round(img.height * 72.0 / dpi[1])
+    # Always return float to match Apple's <real> plist type
+    return float(w_pts), float(h_pts)

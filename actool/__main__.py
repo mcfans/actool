@@ -22,8 +22,11 @@ def _output_plist(data: dict, fmt: str):
     elif fmt == "human-readable-text":
         _print_human_readable(data)
     else:
-        sys.stdout.buffer.write(plistlib.dumps(data, fmt=plistlib.FMT_XML))
-        sys.stdout.buffer.write(b"\n")
+        import re
+        xml = plistlib.dumps(data, fmt=plistlib.FMT_XML)
+        # Apple writes <real>16</real> not <real>16.0</real>
+        xml = re.sub(rb"<real>(\d+)\.0</real>", rb"<real>\1</real>", xml)
+        sys.stdout.buffer.write(xml)
 
 
 def _print_human_readable(data, indent=0):
@@ -130,10 +133,10 @@ def main():
 
     # Handle --print-contents (without --compile)
     if args.print_contents and not args.compile:
+        from .catalog import list_catalog_contents
+        contents_tree = list_catalog_contents(args.document)
         contents_data = {
-            "com.apple.actool.catalog-contents": [
-                {"filename": args.document}
-            ]
+            "com.apple.actool.catalog-contents": [contents_tree]
         }
         _output_plist(contents_data, args.output_format)
         return
