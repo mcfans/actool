@@ -375,16 +375,16 @@ def _list_imageset(item_path: Path) -> dict:
         if idiom:
             entry["idiom"] = idiom
 
+        scale = img_info.get("scale")
+        if scale:
+            entry["scale"] = scale
+
         try:
             img = Image.open(str(img_path))
             w_pts, h_pts = _image_point_size(img)
             entry["image"] = {"height": h_pts, "width": w_pts}
         except Exception:
             pass
-
-        scale = img_info.get("scale")
-        if scale:
-            entry["scale"] = scale
 
         image_children.append(entry)
 
@@ -418,6 +418,12 @@ def _list_appiconset(item_path: Path) -> dict:
         idiom = img_info.get("idiom")
         if idiom:
             entry["idiom"] = idiom
+        size = img_info.get("size")
+        if size:
+            entry["size"] = size
+        scale = img_info.get("scale")
+        if scale:
+            entry["scale"] = scale
 
         try:
             img = Image.open(str(img_path))
@@ -425,13 +431,6 @@ def _list_appiconset(item_path: Path) -> dict:
             entry["image"] = {"height": h_pts, "width": w_pts}
         except Exception:
             pass
-
-        scale = img_info.get("scale")
-        if scale:
-            entry["scale"] = scale
-        size = img_info.get("size")
-        if size:
-            entry["size"] = size
 
         image_children.append(entry)
 

@@ -186,18 +186,18 @@ def compile_catalog(xcassets_path: str, output_dir: str, platform: str,
                           widget_background_color=widget_background_color,
                           localizations=locales)
 
-    # Print compilation results
+    # Collect output files
     output_files = []
-    if info_plist_path:
-        output_files.append(os.path.abspath(info_plist_path))
     if app_icon and standalone_icon_behavior != "none":
         icns_path = os.path.join(output_dir, f"{app_icon}.icns")
         if os.path.exists(icns_path):
             output_files.append(os.path.abspath(icns_path))
     car_path_abs = os.path.abspath(car_path)
     output_files.append(car_path_abs)
+    if info_plist_path:
+        output_files.append(os.path.abspath(info_plist_path))
 
-    _print_compilation_results(output_files)
+    return output_files
 
 
 def _make_bitmap_info(identifier: int,
@@ -254,19 +254,3 @@ def _write_info_plist(path: str, app_icon: str = None,
         f.write("\n".join(lines))
 
 
-def _print_compilation_results(output_files: list[str]):
-    """Print compilation results in Apple's plist format."""
-    files_xml = "\n".join(f"\t\t\t<string>{f}</string>" for f in output_files)
-    print(f"""<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-\t<key>com.apple.actool.compilation-results</key>
-\t<dict>
-\t\t<key>output-files</key>
-\t\t<array>
-{files_xml}
-\t\t</array>
-\t</dict>
-</dict>
-</plist>""")

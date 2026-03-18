@@ -30,24 +30,60 @@ def _output_plist(data: dict, fmt: str):
         sys.stdout.buffer.write(xml)
 
 
-def _print_human_readable(data, indent=0):
-    """Print a plist dict in human-readable text format."""
-    prefix = "  " * indent
+def _print_human_readable(data, indent=0, top_level=True):
+    """Print a plist dict in Apple's human-readable text format.
+
+    Top-level keys use /* key */ comment style.
+    Nested dicts use 'key: value' with aligned indentation.
+    Arrays list items at the current indentation.
+    """
+    prefix = " " * indent
     if isinstance(data, dict):
         for k, v in data.items():
-            if isinstance(v, (dict, list)):
-                print(f"{prefix}{k}:")
-                _print_human_readable(v, indent + 1)
+            if top_level:
+                print(f"/* {k} */")
+                _print_human_readable(v, 0, top_level=False)
+            elif isinstance(v, dict):
+                label = f"{k}: "
+                print(f"{prefix}{label}")
+                _print_human_readable(v, indent + len(label),
+                                      top_level=False)
+            elif isinstance(v, list):
+                label = f"{k}: "
+                # Print label with trailing spaces to align children
+                child_indent = indent + len(label)
+                print(f"{prefix}{label}", end="")
+                # Pad to child indent width
+                print()
+                _print_hr_array(v, child_indent)
             else:
-                print(f"{prefix}{k}: {v}")
+                val = _hr_format_value(v)
+                print(f"{prefix}{k}: {val}")
     elif isinstance(data, list):
-        for item in data:
-            if isinstance(item, (dict, list)):
-                _print_human_readable(item, indent)
-            else:
-                print(f"{prefix}- {item}")
+        _print_hr_array(data, indent)
     else:
-        print(f"{prefix}{data}")
+        print(f"{prefix}{_hr_format_value(data)}")
+
+
+def _hr_format_value(v):
+    """Format a scalar value for human-readable output."""
+    if isinstance(v, float) and v == int(v):
+        return str(int(v))
+    return str(v)
+
+
+def _print_hr_array(items, indent):
+    """Print array items in human-readable format."""
+    prefix = " " * indent
+    for i, item in enumerate(items):
+        if isinstance(item, dict):
+            _print_human_readable(item, indent, top_level=False)
+            if i < len(items) - 1:
+                print(prefix)
+        elif isinstance(item, list):
+            _print_hr_array(item, indent)
+        else:
+            print(f"{prefix}{_hr_format_value(item)}")
 
 
 def main():
@@ -171,8 +207,9 @@ def main():
     include_langs = args.include_language or None
     plist_l10n = args.include_partial_info_plist_localizations.upper() != "NO"
 
+    output_files = []
     try:
-        compile_catalog(
+        output_files = compile_catalog(
             xcassets_path=args.document,
             output_dir=args.compile,
             platform=args.platform,
@@ -190,13 +227,26 @@ def main():
             notices_list=notices,
         )
     except FileNotFoundError as e:
-        errors.append({"message": str(e), "type": "error"})
+        errors.append({"description": str(e)})
     except Exception as e:
-        errors.append({"message": str(e), "type": "error"})
+        errors.append({"description": str(e)})
 
-    # Build output
+    # Output compilation results
+    if args.output_format == "human-readable-text":
+        # Apple's human-readable format lists files directly
+        results_data = {
+            "com.apple.actool.compilation-results": output_files,
+        }
+    else:
+        results_data = {
+            "com.apple.actool.compilation-results": {
+                "output-files": output_files,
+            }
+        }
+    _output_plist(results_data, args.output_format)
+
+    # Output diagnostics
     if args.warnings and warnings:
-        # Output warnings
         output = {"com.apple.actool.document.warnings": warnings}
         _output_plist(output, args.output_format)
 
