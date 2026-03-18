@@ -214,35 +214,45 @@ def make_bytes_per_row_tlv(width: int, pixel_format: bytes) -> bytes:
 
 
 def make_inlk_tlv(x: int, y: int, width: int, height: int,
-                   pixel_format: bytes, scale: int) -> bytes:
-    """Build an INLK TLV (0x03f2) for packed image references."""
+                   pixel_format: bytes, scale: int,
+                   atlas_identifier: int = 0) -> bytes:
+    """Build an INLK TLV (0x03f2) for packed image references.
+
+    atlas_identifier: if non-zero, this is a sprite atlas reference and the
+    atlas ID is included in the trailing key attributes.
+    """
     # KLNI tag + version + x + y + w + h
     inlk = struct.pack("<4sI", b"KLNI", 0)
     inlk += struct.pack("<IIII", x, y, width, height)
-    # Trailing: stride info + key attributes for the packed asset
+    # Build trailing attribute data
+    attr_data = b""
+    attr_data += struct.pack("<HH", 0, 0)  # padding
+    attr_data += struct.pack("<HH", 1, ELEMENT_PACKED)  # Element = 9
+    attr_data += struct.pack("<HH", 2, PART_REGULAR)  # Part = 181
+    attr_data += struct.pack("<HH", 12, scale)  # Scale
+    if atlas_identifier:
+        attr_data += struct.pack("<HH", 17, atlas_identifier)  # Identifier
+    # Header: stride-like value + attr data length
     bpp = 4 if pixel_format == b"BGRA" else 2
-    stride = width * bpp
-    # Stride info (2 uint16s)
-    inlk += struct.pack("<HH", stride, 0)
-    # Rendition key attributes: element=9, part=181, scale
-    inlk += struct.pack("<HH", 0, 0)  # padding/unknown
-    inlk += struct.pack("<HH", 1, 9)  # Element = 9 (packed asset)
-    inlk += struct.pack("<HH", 2, PART_REGULAR)  # Part = 181
-    inlk += struct.pack("<HH", 12, scale)  # Scale
+    stride_val = width * bpp
+    inlk += struct.pack("<HH", stride_val & 0xFFFF, len(attr_data))
+    inlk += attr_data
     inlk += struct.pack("<HH", 0, 0)  # terminator
     return struct.pack("<II", 0x03F2, len(inlk)) + inlk
 
 
 def build_packed_image_csi(name: str, width: int, height: int,
                            scale: int, pixel_format: bytes,
-                           x: int, y: int) -> bytes:
+                           x: int, y: int,
+                           atlas_identifier: int = 0) -> bytes:
     """Build a CSI for a packed image reference (layout 1003)."""
     scale_factor = scale * 100
 
     # TLV section
     tlv = make_slices_tlv(width, height)
     tlv += make_metrics_tlv(width, height)
-    tlv += make_inlk_tlv(x, y, width, height, pixel_format, scale)
+    tlv += make_inlk_tlv(x, y, width, height, pixel_format, scale,
+                         atlas_identifier=atlas_identifier)
     tlv += make_blend_opacity_tlv()
     tlv += make_exif_orientation_tlv()
 
@@ -301,6 +311,20 @@ def build_color_csi(name: str, red: float, green: float, blue: float,
     )
 
 
+def build_sprite_atlas_metadata_csi(name: str) -> bytes:
+    """Build a CSI for sprite atlas metadata (layout 1005)."""
+    tlv = make_blend_opacity_tlv()
+    tlv += make_exif_orientation_tlv()
+
+    return build_csi(
+        width=0, height=0, scale_factor=0,
+        pixel_format=b"\x00\x00\x00\x00",
+        layout=LAYOUT_METADATA, name="CoreStructuredImage",
+        tlv_data=tlv, rendition_data=b"",
+        colorspace_id=0,
+    )
+
+
 def build_data_csi(name: str, raw_data: bytes) -> bytes:
     """Build a CSI for a raw data rendition (layout 1000)."""
     # RAWD header
@@ -346,6 +370,7 @@ class Rendition:
     is_template: bool = False
     colorspace_id: int = 1
     locale: str = ""  # Empty = non-localized, "en"/"fr"/etc = localized
+    sprite_atlas_id: int = 0  # Non-zero = belongs to a sprite atlas
 
     has_icon: bool = True
 

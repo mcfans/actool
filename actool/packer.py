@@ -186,9 +186,10 @@ def group_for_packing(renditions) -> tuple[list, list]:
             icon_renditions.append(rend)
             continue
 
-        # Group by format, scale, and whether it's an icon
+        # Group by format, scale, icon status, and sprite atlas
         is_icon = rend.part == car.PART_ICON
-        key = (rend.pixel_format, rend.scale, is_icon)
+        atlas_id = rend.sprite_atlas_id  # 0 for regular, non-zero for sprites
+        key = (rend.pixel_format, rend.scale, is_icon, atlas_id)
         if key not in groups:
             groups[key] = []
         groups[key].append(rend)
@@ -197,7 +198,7 @@ def group_for_packing(renditions) -> tuple[list, list]:
     pack_groups = []
     inline = list(icon_renditions)
 
-    for (fmt, scale, _is_icon), rends in sorted(groups.items()):
+    for (fmt, scale, _is_icon, _atlas_id), rends in sorted(groups.items()):
         if len(rends) >= 2:
             pack_groups.append((fmt, scale, rends))
         else:

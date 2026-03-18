@@ -61,6 +61,9 @@ def compile_catalog(xcassets_path: str, output_dir: str, platform: str,
     dim1_counter = 0
 
     for fmt, scale, rends in pack_groups:
+        # Check if this is a sprite atlas group
+        sprite_atlas_id = rends[0].sprite_atlas_id if rends else 0
+
         # Create packed images
         packed_imgs = []
         for rend in rends:
@@ -80,16 +83,31 @@ def compile_catalog(xcassets_path: str, output_dir: str, platform: str,
         atlas.dim1 = dim1_counter
         atlas.render()
 
-        # Create PackedAsset rendition (layout 1004)
-        atlas_key = car.make_rendition_key(
-            element=car.ELEMENT_PACKED,
-            part=car.PART_REGULAR,
-            dim1=dim1_counter,
-            scale=scale,
-            has_icon=has_icon,
-        )
+        # Determine atlas name and key
+        if sprite_atlas_id:
+            # Explicit packed asset for sprite atlas
+            atlas_name = atlas.name.replace("ZZZZPackedAsset",
+                                            "ZZZZExplicitlyPackedAsset")
+            atlas_key = car.make_rendition_key(
+                element=car.ELEMENT_PACKED,
+                part=car.PART_REGULAR,
+                identifier=sprite_atlas_id,
+                dim1=dim1_counter,
+                scale=scale,
+                has_icon=has_icon,
+            )
+        else:
+            atlas_name = atlas.name
+            atlas_key = car.make_rendition_key(
+                element=car.ELEMENT_PACKED,
+                part=car.PART_REGULAR,
+                dim1=dim1_counter,
+                scale=scale,
+                has_icon=has_icon,
+            )
+
         atlas_csi = car.build_packed_asset_csi(
-            name=atlas.name,
+            name=atlas_name,
             width=atlas.width,
             height=atlas.height,
             scale=scale,
@@ -115,10 +133,31 @@ def compile_catalog(xcassets_path: str, output_dir: str, platform: str,
                 pixel_format=fmt,
                 x=img.x,
                 y=img.y,
+                atlas_identifier=sprite_atlas_id,
             )
             all_rendition_entries.append((ref_key, ref_csi))
 
         dim1_counter += 1
+
+    # Add sprite atlas metadata renditions
+    for rend in renditions:
+        if rend.sprite_atlas_id and rend.scale == 1:
+            # Only add once per sprite atlas
+            atlas_id = rend.sprite_atlas_id
+            if not any(k == car.make_rendition_key(
+                    element=car.ELEMENT_PACKED,
+                    part=car.PART_SPRITE_ATLAS,
+                    identifier=atlas_id, scale=1,
+                    has_icon=has_icon) for k, _ in all_rendition_entries):
+                meta_key = car.make_rendition_key(
+                    element=car.ELEMENT_PACKED,
+                    part=car.PART_SPRITE_ATLAS,
+                    identifier=atlas_id, scale=1,
+                    has_icon=has_icon,
+                )
+                meta_csi = car.build_sprite_atlas_metadata_csi(
+                    "CoreStructuredImage")
+                all_rendition_entries.append((meta_key, meta_csi))
 
     # Add inline renditions
     for rend in inline_renditions:

@@ -439,6 +439,7 @@ class AssetCatalog:
                         pixel_data=pixel_data,
                         pixel_format=pixel_format,
                         layout=car.LAYOUT_ONE_PART_SCALE,
+                        sprite_atlas_id=atlas_ident,
                     )
                     renditions.append(rend)
 
