@@ -287,7 +287,236 @@ class AssetCatalog:
 
                 facets[name] = (car.ELEMENT_UNIVERSAL, car.PART_ICON, ident)
 
+            elif item.suffix == ".colorset":
+                self._parse_colorset(item, renditions, facets)
+
+            elif item.suffix == ".dataset":
+                self._parse_dataset(item, renditions, facets)
+
+            elif item.suffix == ".spriteatlas":
+                self._parse_spriteatlas(item, renditions, facets)
+
+            elif item.suffix == ".imagestack":
+                self._parse_imagestack(item, renditions, facets)
+
         return renditions, facets
+
+    def _parse_colorset(self, item_path: Path,
+                        renditions: list, facets: dict):
+        """Parse a .colorset directory."""
+        name = item_path.stem
+        ident = self._get_identifier(name)
+        contents_path = item_path / "Contents.json"
+        if not contents_path.exists():
+            return
+
+        with open(contents_path) as f:
+            contents = json.load(f)
+
+        for color_entry in contents.get("colors", []):
+            color_data = color_entry.get("color", {})
+            components = color_data.get("components", {})
+            if not components:
+                continue
+
+            r = float(components.get("red", 0))
+            g = float(components.get("green", 0))
+            b = float(components.get("blue", 0))
+            a = float(components.get("alpha", 1))
+
+            colorspace = color_data.get("color-space", "srgb")
+            cs_id = 0  # sRGB
+
+            # Check for appearance variants (dark mode)
+            appearance = 0
+            appearances = color_entry.get("appearances", [])
+            for app in appearances:
+                if (app.get("appearance") == "luminosity" and
+                        app.get("value") == "dark"):
+                    appearance = 1
+
+            csi = car.build_color_csi(name, r, g, b, a, cs_id)
+            rend = car.Rendition(
+                name=name,
+                identifier=ident,
+                element=car.ELEMENT_UNIVERSAL,
+                part=car.PART_COLOR,
+                scale=1,
+                appearance=appearance,
+                layout=car.LAYOUT_COLOR,
+                pixel_format=b"\x00\x00\x00\x00",
+                colorspace_id=cs_id,
+            )
+            rend._csi_override = csi
+            renditions.append(rend)
+
+        facets[name] = (car.ELEMENT_UNIVERSAL, car.PART_COLOR, ident)
+
+    def _parse_dataset(self, item_path: Path,
+                       renditions: list, facets: dict):
+        """Parse a .dataset directory."""
+        name = item_path.stem
+        ident = self._get_identifier(name)
+        contents_path = item_path / "Contents.json"
+        if not contents_path.exists():
+            return
+
+        with open(contents_path) as f:
+            contents = json.load(f)
+
+        for data_entry in contents.get("data", []):
+            filename = data_entry.get("filename")
+            if not filename:
+                continue
+            data_path = item_path / filename
+            if not data_path.exists():
+                continue
+
+            with open(data_path, "rb") as f:
+                raw_data = f.read()
+
+            csi = car.build_data_csi(name, raw_data)
+            rend = car.Rendition(
+                name="CoreStructuredImage",
+                identifier=ident,
+                element=car.ELEMENT_UNIVERSAL,
+                part=car.PART_REGULAR,
+                scale=1,
+                layout=car.LAYOUT_RAW_DATA,
+                pixel_format=car.PIXELFMT_DATA,
+            )
+            rend._csi_override = csi
+            renditions.append(rend)
+
+        facets[name] = (car.ELEMENT_UNIVERSAL, car.PART_REGULAR, ident)
+
+    def _parse_spriteatlas(self, item_path: Path,
+                           renditions: list, facets: dict):
+        """Parse a .spriteatlas directory."""
+        atlas_name = item_path.stem
+        atlas_ident = self._get_identifier(atlas_name)
+
+        # Register the atlas facet (element=9 for packed, no part)
+        facets[atlas_name] = (car.ELEMENT_PACKED, None, atlas_ident)
+
+        # Parse each imageset inside the spriteatlas
+        for sprite_item in sorted(item_path.iterdir()):
+            if sprite_item.suffix == ".imageset":
+                sprite_name = sprite_item.stem
+                # Namespaced facet: "AtlasName/SpriteName"
+                full_name = f"{atlas_name}/{sprite_name}"
+                sprite_ident = self._get_identifier(full_name)
+
+                contents_path = sprite_item / "Contents.json"
+                if not contents_path.exists():
+                    continue
+
+                with open(contents_path) as f:
+                    contents = json.load(f)
+
+                for img_info in contents.get("images", []):
+                    filename = img_info.get("filename")
+                    if not filename:
+                        continue
+                    img_path = sprite_item / filename
+                    if not img_path.exists():
+                        continue
+
+                    scale_str = img_info.get("scale", "1x")
+                    scale = int(scale_str.replace("x", ""))
+
+                    pixel_data, width, height, pixel_format = \
+                        load_image_as_bgra(str(img_path))
+
+                    rend = car.Rendition(
+                        name=filename,
+                        identifier=sprite_ident,
+                        element=car.ELEMENT_UNIVERSAL,
+                        part=car.PART_REGULAR,
+                        scale=scale,
+                        width=width,
+                        height=height,
+                        pixel_data=pixel_data,
+                        pixel_format=pixel_format,
+                        layout=car.LAYOUT_ONE_PART_SCALE,
+                    )
+                    renditions.append(rend)
+
+                facets[full_name] = (car.ELEMENT_UNIVERSAL,
+                                     car.PART_REGULAR, sprite_ident)
+
+    def _parse_imagestack(self, item_path: Path,
+                          renditions: list, facets: dict):
+        """Parse a .imagestack directory."""
+        stack_name = item_path.stem
+        contents_path = item_path / "Contents.json"
+        if not contents_path.exists():
+            return
+
+        with open(contents_path) as f:
+            contents = json.load(f)
+
+        # Process each layer
+        for layer_info in contents.get("layers", []):
+            layer_filename = layer_info.get("filename")
+            if not layer_filename:
+                continue
+            layer_path = item_path / layer_filename
+            if not layer_path.exists():
+                continue
+
+            layer_name = Path(layer_filename).stem
+
+            # Each layer has a Content.imageset inside
+            content_imageset = layer_path / "Content.imageset"
+            if not content_imageset.exists():
+                continue
+
+            # Namespaced facet: "StackName/LayerName/Content"
+            full_name = f"{stack_name}/{layer_name}/Content"
+            layer_ident = self._get_identifier(full_name)
+
+            img_contents_path = content_imageset / "Contents.json"
+            if not img_contents_path.exists():
+                continue
+
+            with open(img_contents_path) as f:
+                img_contents = json.load(f)
+
+            for img_info in img_contents.get("images", []):
+                filename = img_info.get("filename")
+                if not filename:
+                    continue
+                img_path = content_imageset / filename
+                if not img_path.exists():
+                    continue
+
+                scale_str = img_info.get("scale", "1x")
+                scale = int(scale_str.replace("x", ""))
+
+                idiom = img_info.get("idiom", "universal")
+                if self.platform == "macosx" and idiom not in ("mac", "universal"):
+                    continue
+
+                pixel_data, width, height, pixel_format = \
+                    load_image_as_bgra(str(img_path))
+
+                rend = car.Rendition(
+                    name=filename,
+                    identifier=layer_ident,
+                    element=car.ELEMENT_UNIVERSAL,
+                    part=car.PART_REGULAR,
+                    scale=scale,
+                    width=width,
+                    height=height,
+                    pixel_data=pixel_data,
+                    pixel_format=pixel_format,
+                    layout=car.LAYOUT_ONE_PART_SCALE,
+                )
+                renditions.append(rend)
+
+            facets[full_name] = (car.ELEMENT_UNIVERSAL,
+                                 car.PART_REGULAR, layer_ident)
 
     def get_icon_images(self) -> list[tuple[str, int, int]]:
         """Get paths and sizes for app icon images (for ICNS generation)."""
@@ -342,6 +571,14 @@ def list_catalog_contents(xcassets_path: str) -> dict:
             children.append(_list_imageset(item))
         elif item.suffix == ".appiconset":
             children.append(_list_appiconset(item))
+        elif item.suffix == ".colorset":
+            children.append({"filename": item.name})
+        elif item.suffix == ".dataset":
+            children.append({"filename": item.name})
+        elif item.suffix == ".spriteatlas":
+            children.append(_list_spriteatlas(item))
+        elif item.suffix == ".imagestack":
+            children.append(_list_imagestack(item))
 
     result = {"filename": catalog_path.name}
     if children:
@@ -359,7 +596,7 @@ def _list_imageset(item_path: Path) -> dict:
         contents = json.load(f)
 
     props = contents.get("properties", {})
-    rendering = props.get("template-rendering-intent", "original")
+    rendering = props.get("template-rendering-intent")
 
     image_children = []
     for img_info in contents.get("images", []):
@@ -389,7 +626,7 @@ def _list_imageset(item_path: Path) -> dict:
         image_children.append(entry)
 
     result = {"filename": item_path.name}
-    if rendering:
+    if rendering is not None:
         result["template-rendering-intent"] = rendering
     if image_children:
         result["children"] = image_children
@@ -437,6 +674,52 @@ def _list_appiconset(item_path: Path) -> dict:
     result = {"filename": item_path.name}
     if image_children:
         result["children"] = image_children
+    return result
+
+
+def _list_spriteatlas(item_path: Path) -> dict:
+    """List contents of a .spriteatlas directory."""
+    children = []
+    for sprite_item in sorted(item_path.iterdir()):
+        if sprite_item.suffix == ".imageset":
+            children.append(_list_imageset(sprite_item))
+    result = {"filename": item_path.name}
+    if children:
+        result["children"] = children
+    return result
+
+
+def _list_imagestack(item_path: Path) -> dict:
+    """List contents of a .imagestack directory."""
+    contents_path = item_path / "Contents.json"
+    if not contents_path.exists():
+        return {"filename": item_path.name}
+
+    with open(contents_path) as f:
+        contents = json.load(f)
+
+    children = []
+    for layer_info in contents.get("layers", []):
+        layer_filename = layer_info.get("filename")
+        if not layer_filename:
+            continue
+        layer_path = item_path / layer_filename
+        if not layer_path.exists():
+            continue
+
+        layer_children = []
+        content_imageset = layer_path / "Content.imageset"
+        if content_imageset.exists():
+            layer_children.append(_list_imageset(content_imageset))
+
+        layer_entry = {"filename": layer_filename}
+        if layer_children:
+            layer_entry["children"] = layer_children
+        children.append(layer_entry)
+
+    result = {"filename": item_path.name}
+    if children:
+        result["children"] = children
     return result
 
 

@@ -30,12 +30,19 @@ ELEMENT_UNIVERSAL = 85  # 0x55
 PART_ICON = 220  # 0xDC - app icon part
 PART_ICON_MULTISIZE = 218  # 0xDA - multisize image descriptor
 PART_REGULAR = 181  # 0xB5
+PART_COLOR = 217  # 0xD9 - color rendition
+PART_SPRITE_ATLAS = 127  # 0x7F - sprite atlas metadata
 
 LAYOUT_ONE_PART_SCALE = 12
+LAYOUT_RAW_DATA = 1000
 LAYOUT_PACKED_IMAGE = 1003
 LAYOUT_NAME_LIST = 1004  # PackedAsset
+LAYOUT_METADATA = 1005  # CoreStructuredImage for sprite atlas metadata
 LAYOUT_COLOR = 1009
 LAYOUT_MULTISIZE_IMAGE = 1010
+
+# Pixel format for raw data
+PIXELFMT_DATA = b"ATAD"  # 'DATA' as LE uint32
 
 
 def make_carheader(rendition_count: int) -> bytes:
@@ -108,7 +115,10 @@ def make_rendition_key(appearance: int = 0, unknown13: int = 0,
 def make_facetkey_value(element: int, part: int, identifier: int) -> bytes:
     """Build a renditionkeytoken value for FACETKEYS."""
     # cursorHotSpot (4 bytes) + numberOfAttributes (2 bytes) + attributes
-    attrs = [(1, element), (2, part), (17, identifier)]
+    attrs = [(1, element)]
+    if part is not None:
+        attrs.append((2, part))
+    attrs.append((17, identifier))
     buf = struct.pack("<HHH", 0, 0, len(attrs))
     for name, val in attrs:
         buf += struct.pack("<HH", name, val)
@@ -268,6 +278,45 @@ def build_packed_asset_csi(name: str, width: int, height: int,
 
 
 ELEMENT_PACKED = 9  # Element for packed assets
+
+
+def build_color_csi(name: str, red: float, green: float, blue: float,
+                    alpha: float, colorspace_id: int = 0) -> bytes:
+    """Build a CSI for a color rendition (layout 1009)."""
+    # Color rendition data: COLR tag + version + colorspace + count + components
+    colr = struct.pack("<4sI", b"RLOC", 0)  # 'COLR' as LE
+    colr += struct.pack("<I", colorspace_id & 0xFF)  # colorspace byte
+    colr += struct.pack("<I", 4)  # number of components (RGBA)
+    colr += struct.pack("<4d", red, green, blue, alpha)
+
+    tlv = make_blend_opacity_tlv()
+    tlv += make_exif_orientation_tlv()
+
+    return build_csi(
+        width=0, height=0, scale_factor=0,
+        pixel_format=b"\x00\x00\x00\x00",
+        layout=LAYOUT_COLOR, name=name,
+        tlv_data=tlv, rendition_data=colr,
+        colorspace_id=colorspace_id,
+    )
+
+
+def build_data_csi(name: str, raw_data: bytes) -> bytes:
+    """Build a CSI for a raw data rendition (layout 1000)."""
+    # RAWD header
+    rawd = struct.pack("<4sII", b"DWAR", 1, len(raw_data))
+    rawd += raw_data
+
+    tlv = make_blend_opacity_tlv()
+    tlv += make_exif_orientation_tlv()
+
+    return build_csi(
+        width=0, height=0, scale_factor=0,
+        pixel_format=PIXELFMT_DATA,
+        layout=LAYOUT_RAW_DATA, name="CoreStructuredImage",
+        tlv_data=tlv, rendition_data=rawd,
+        bitmaplist_unknown=1,
+    )
 
 
 def _hash_name(name: str) -> int:

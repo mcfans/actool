@@ -172,12 +172,17 @@ def group_for_packing(renditions) -> tuple[list, list]:
     ICON_INLINE_THRESHOLD = 256
 
     for rend in renditions:
-        # Multisize renditions are always inline
-        if rend.layout == car.LAYOUT_MULTISIZE_IMAGE:
+        # Multisize, color, and data renditions are always inline
+        if rend.layout in (car.LAYOUT_MULTISIZE_IMAGE, car.LAYOUT_COLOR,
+                           car.LAYOUT_RAW_DATA, car.LAYOUT_METADATA):
             icon_renditions.append(rend)
             continue
         # Large app icon renditions are stored inline
         if rend.part == car.PART_ICON and rend.width >= ICON_INLINE_THRESHOLD:
+            icon_renditions.append(rend)
+            continue
+        # Renditions with CSI overrides (pre-built) are always inline
+        if hasattr(rend, '_csi_override'):
             icon_renditions.append(rend)
             continue
 
