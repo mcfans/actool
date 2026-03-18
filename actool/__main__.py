@@ -207,6 +207,45 @@ def main():
     include_langs = args.include_language or None
     plist_l10n = args.include_partial_info_plist_localizations.upper() != "NO"
 
+    # Check if input is a .icon bundle
+    from .icon_bundle import is_icon_bundle, compile_icon_bundle
+    if is_icon_bundle(args.document):
+        output_files = []
+        try:
+            output_files = compile_icon_bundle(
+                icon_path=args.document,
+                output_dir=args.compile,
+                platform=args.platform,
+                min_deploy=args.minimum_deployment_target,
+                app_icon=args.app_icon,
+                info_plist_path=args.output_partial_info_plist,
+                accent_color=args.accent_color,
+                standalone_icon_behavior=args.standalone_icon_behavior,
+                warnings_list=warnings,
+                notices_list=notices,
+            )
+        except Exception as e:
+            errors.append({"description": str(e)})
+
+        # Output results
+        if args.output_format == "human-readable-text":
+            results_data = {"com.apple.actool.compilation-results": output_files}
+        else:
+            results_data = {"com.apple.actool.compilation-results": {
+                "output-files": output_files}}
+
+        if notices and (args.notices or args.warnings):
+            notices_data = {"com.apple.actool.notices": notices}
+            _output_plist(notices_data, args.output_format)
+
+        _output_plist(results_data, args.output_format)
+
+        if errors:
+            err_data = {"com.apple.actool.errors": errors}
+            _output_plist(err_data, args.output_format)
+            sys.exit(1)
+        return
+
     output_files = []
     try:
         output_files = compile_catalog(
