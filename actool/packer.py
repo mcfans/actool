@@ -37,6 +37,8 @@ class PackedImage:
     pixel_format: bytes = b"BGRA"
     scale: int = 1
     is_template: bool = False
+    part: int = 181  # PART_REGULAR by default, PART_ICON for icons
+    dim2: int = 0  # For icon images, the multisize index
 
 
 @dataclass

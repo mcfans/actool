@@ -76,6 +76,8 @@ def compile_catalog(xcassets_path: str, output_dir: str, platform: str,
                 pixel_format=rend.pixel_format,
                 scale=rend.scale,
                 is_template=rend.is_template,
+                part=rend.part,
+                dim2=rend.dim2,
             ))
 
         # Pack into atlas
@@ -120,8 +122,9 @@ def compile_catalog(xcassets_path: str, output_dir: str, platform: str,
         for img in atlas.images:
             ref_key = car.make_rendition_key(
                 element=car.ELEMENT_UNIVERSAL,
-                part=car.PART_REGULAR,
+                part=img.part,
                 identifier=img.identifier,
+                dim2=img.dim2,
                 scale=scale,
                 has_icon=has_icon,
             )
@@ -198,13 +201,10 @@ def compile_catalog(xcassets_path: str, output_dir: str, platform: str,
     bom.add_tree("RENDITIONS", all_rendition_entries)
 
     # Build BITMAPKEYS tree
-    bitmapkey_entries = []
-    for name in sorted(facets.keys(), key=lambda n: facets[n][2]):
-        elem, part, ident = facets[name]
-        key_data = struct.pack(">H", ident)
-        value_data = _make_bitmap_info(ident, renditions)
-        bitmapkey_entries.append((key_data, value_data))
-    bom.add_tree("BITMAPKEYS", bitmapkey_entries)
+    # BITMAPKEYS uses a non-standard BOM tree format where keys are raw
+    # identifier values (not block references). We write an empty tree
+    # since the data is not required for CoreUI to read the CAR.
+    bom.add_tree("BITMAPKEYS", [])
 
     # Write the CAR file
     car_path = os.path.join(output_dir, "Assets.car")
