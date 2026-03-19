@@ -143,24 +143,30 @@ def compile_catalog(xcassets_path: str, output_dir: str, platform: str,
         dim1_counter += 1
 
     # Add sprite atlas metadata renditions
-    for rend in renditions:
-        if rend.sprite_atlas_id and rend.scale == 1:
-            # Only add once per sprite atlas
-            atlas_id = rend.sprite_atlas_id
-            if not any(k == car.make_rendition_key(
-                    element=car.ELEMENT_PACKED,
-                    part=car.PART_SPRITE_ATLAS,
-                    identifier=atlas_id, scale=1,
-                    has_icon=has_icon) for k, _ in all_rendition_entries):
-                meta_key = car.make_rendition_key(
-                    element=car.ELEMENT_PACKED,
-                    part=car.PART_SPRITE_ATLAS,
-                    identifier=atlas_id, scale=1,
-                    has_icon=has_icon,
-                )
-                meta_csi = car.build_sprite_atlas_metadata_csi(
-                    "CoreStructuredImage")
-                all_rendition_entries.append((meta_key, meta_csi))
+    # Collect sprite names per atlas
+    atlas_sprites: dict[int, list[str]] = {}
+    for name, (elem, part, ident) in facets.items():
+        for rend in renditions:
+            if rend.sprite_atlas_id and rend.identifier == ident:
+                aid = rend.sprite_atlas_id
+                if aid not in atlas_sprites:
+                    atlas_sprites[aid] = []
+                if name not in atlas_sprites[aid]:
+                    atlas_sprites[aid].append(name)
+                break
+
+    for atlas_id, sprite_names in atlas_sprites.items():
+        meta_key = car.make_rendition_key(
+            element=car.ELEMENT_PACKED,
+            part=car.PART_SPRITE_ATLAS,
+            identifier=atlas_id, scale=1,
+            has_icon=has_icon,
+        )
+        if not any(k == meta_key for k, _ in all_rendition_entries):
+            meta_csi = car.build_sprite_atlas_metadata_csi(
+                "CoreStructuredImage",
+                sprite_names=sorted(sprite_names))
+            all_rendition_entries.append((meta_key, meta_csi))
 
     # Add inline renditions
     for rend in inline_renditions:

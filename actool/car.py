@@ -307,17 +307,28 @@ def build_color_csi(name: str, red: float, green: float, blue: float,
     )
 
 
-def build_sprite_atlas_metadata_csi(name: str) -> bytes:
+def build_sprite_atlas_metadata_csi(name: str,
+                                     sprite_names: list[str] = None) -> bytes:
     """Build a CSI for sprite atlas metadata (layout 1005)."""
     tlv = make_blend_opacity_tlv()
     tlv += make_exif_orientation_tlv()
 
+    # TLV 0x03F5: sprite atlas contents list
+    if sprite_names:
+        contents = struct.pack("<II", len(sprite_names), 0)
+        for sn in sprite_names:
+            sn_bytes = sn.encode("ascii")
+            contents += struct.pack("<I", len(sn_bytes))
+            contents += sn_bytes
+        tlv += struct.pack("<II", 0x03F5, len(contents)) + contents
+
     return build_csi(
-        width=0, height=0, scale_factor=0,
+        width=0, height=0, scale_factor=100,
         pixel_format=b"\x00\x00\x00\x00",
         layout=LAYOUT_METADATA, name="CoreStructuredImage",
         tlv_data=tlv, rendition_data=b"",
         colorspace_id=0,
+        bitmaplist_unknown=1,
     )
 
 
