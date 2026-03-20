@@ -162,11 +162,19 @@ def compress_data(pixel_data: bytes, pixel_format: bytes,
                   width: int, height: int) -> bytes:
     """Compress pixel data and return the rendition payload (CELM block).
 
-    Uses uncompressed CELM ver=1 format. CoreUI on modern macOS expects
-    either uncompressed (comp=0) or the DMP2 tile-based format (CELM ver=2,
-    comp=11) used by the system actool. Plain LZFSE (comp=4) in a CELM ver=1
-    block is NOT supported and causes 'Can't find the correct chunk' crashes.
+    Uses CELM ver=2 with LZFSE compression (comp=4) when liblzfse is
+    available and compression reduces size. Falls back to uncompressed
+    CELM ver=1 (comp=0).
+
+    Important: CELM ver=1 comp=4 crashes CoreUI ('Can't find the correct
+    chunk'). LZFSE requires CELM ver=2.
     """
+    if HAS_LZFSE and len(pixel_data) > 256:
+        compressed = lzfse.compress(pixel_data)
+        if len(compressed) < len(pixel_data):
+            celm = struct.pack("<4sIII", b"MLEC", 2, 4, len(compressed))
+            return celm + compressed
+    # Uncompressed fallback
     celm = struct.pack("<4sIII", b"MLEC", 1, 0, len(pixel_data))
     return celm + pixel_data
 

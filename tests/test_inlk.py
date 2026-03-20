@@ -375,12 +375,11 @@ class TestCelmFormat(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmpdir)
 
-    def test_celm_no_lzfse_compression(self):
-        """CELM blocks must NOT use comp=4 (LZFSE) with ver=1.
+    def test_celm_no_ver1_lzfse(self):
+        """CELM ver=1 must NOT use comp=4 (LZFSE).
 
         Regression: plain LZFSE in CELM ver=1 crashes CoreUI with
-        'Can't find the correct chunk' because CoreUI expects either
-        uncompressed (comp=0) or DMP2 chunked format (ver=2, comp=11).
+        'Can't find the correct chunk'. LZFSE requires CELM ver=2.
         """
         entries = _parse_celm_entries(self.car_path)
         self.assertGreater(len(entries), 0)
@@ -389,6 +388,15 @@ class TestCelmFormat(unittest.TestCase):
                 self.assertNotEqual(e['celm_comp'], 4,
                                     f"{e['name']}: CELM ver=1 comp=4 (LZFSE) "
                                     f"is not supported by CoreUI")
+
+    def test_celm_lzfse_uses_ver2(self):
+        """When LZFSE is used, it must be CELM ver=2."""
+        entries = _parse_celm_entries(self.car_path)
+        for e in entries:
+            if e['celm_comp'] == 4:
+                self.assertEqual(e['celm_ver'], 2,
+                                 f"{e['name']}: LZFSE comp=4 requires ver=2, "
+                                 f"got ver={e['celm_ver']}")
 
     def test_celm_uncompressed_data_matches_dimensions(self):
         """For uncompressed CELM, data length must match w * h * bpp."""
@@ -476,6 +484,115 @@ class TestCoreUIRendering(unittest.TestCase):
         # Same number of successful images
         self.assertEqual(our_ok, sys_ok,
                          f"Ours: {our_ok} OK, System: {sys_ok} OK")
+
+
+@unittest.skipUnless(has_validate_car() and has_system_actool(),
+                     "validate_car tool or system actool not available")
+class TestCoreUIRenderingLegacyTarget(unittest.TestCase):
+    """Regression tests using system actool with legacy deployment targets.
+
+    Tests 10.10 (CELM ver=2/3 with RLE/LZVN) and 10.11 (CELM ver=3 comp=4
+    LZFSE). Our car files must render identically to the system output.
+
+    Regression: CELM ver=1 comp=4 (plain LZFSE) caused 'Can't find the
+    correct chunk' crash. Only uncompressed (comp=0) or Apple's proprietary
+    formats (ver=2/3) are supported by CoreUI.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="actool_legacy_")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir)
+
+    def _assert_renders_match(self, min_deploy, catalog_path, app_icon=None,
+                              label=""):
+        """Compile with both actool implementations, assert both render OK."""
+        our_dir = os.path.join(self.tmpdir, f"ours_{label}")
+        sys_dir = os.path.join(self.tmpdir, f"system_{label}")
+        plist = os.path.join(our_dir, "Info.plist") if app_icon else None
+        compile_catalog(catalog_path, our_dir, "macosx", min_deploy,
+                        app_icon=app_icon, info_plist_path=plist)
+        compile_with_system_actool(catalog_path, sys_dir,
+                                   app_icon=app_icon,
+                                   min_deploy=min_deploy)
+
+        sys_ok, sys_fail, sys_details = validate_car_rendering(
+            os.path.join(sys_dir, "Assets.car"))
+        self.assertEqual(sys_fail, 0,
+                         f"System {min_deploy} car failures: {sys_details}")
+
+        our_ok, our_fail, our_details = validate_car_rendering(
+            os.path.join(our_dir, "Assets.car"))
+        crashes = [d for d in our_details if d[0] == "CRASH"]
+        self.assertEqual(len(crashes), 0,
+                         f"Our {min_deploy} car CoreUI crashes: {crashes}")
+        self.assertEqual(our_ok, sys_ok,
+                         f"Ours: {our_ok} OK, System: {sys_ok} OK")
+
+    def test_render_10_10_matches_system(self):
+        """Our car renders same images as system actool with 10.10 target."""
+        self._assert_renders_match("10.10", REF_XCASSETS,
+                                   app_icon="AppIcon", label="10_10")
+
+    def test_render_10_10_mixed_formats(self):
+        """Mixed BGRA + GA8 catalog renders with 10.10 target."""
+        catalog, _ = make_temp_catalog(
+            [("RgbA", "RGBA"), ("RgbB", "RGBA"),
+             ("GrayA", "LA"), ("GrayB", "LA")],
+            self.tmpdir)
+        our_dir = os.path.join(self.tmpdir, "mixed_ours")
+        sys_dir = os.path.join(self.tmpdir, "mixed_sys")
+        compile_catalog(catalog, our_dir, "macosx", "10.10")
+        compile_with_system_actool(catalog, sys_dir, min_deploy="10.10")
+
+        sys_ok, sys_fail, _ = validate_car_rendering(
+            os.path.join(sys_dir, "Assets.car"))
+        self.assertEqual(sys_fail, 0)
+
+        our_ok, our_fail, our_details = validate_car_rendering(
+            os.path.join(our_dir, "Assets.car"))
+        crashes = [d for d in our_details if d[0] == "CRASH"]
+        self.assertEqual(len(crashes), 0,
+                         f"CoreUI crashes: {crashes}")
+
+    def test_render_10_11_matches_system(self):
+        """Our car renders same images as system actool with 10.11 target.
+
+        The 10.11 target causes the system actool to produce CELM ver=3
+        comp=4 (LZFSE) entries. Our uncompressed output must render the
+        same set of images.
+        """
+        self._assert_renders_match("10.11", REF_XCASSETS,
+                                   app_icon="AppIcon", label="10_11")
+
+    def test_render_10_11_mixed_formats(self):
+        """Mixed BGRA + GA8 catalog renders with 10.11 target."""
+        catalog, _ = make_temp_catalog(
+            [("RgbA", "RGBA"), ("RgbB", "RGBA"),
+             ("GrayA", "LA"), ("GrayB", "LA")],
+            self.tmpdir)
+        self._assert_renders_match("10.11", catalog, label="10_11_mixed")
+
+    def test_celm_no_unsupported_compression(self):
+        """CELM blocks must not use compression types CoreUI can't handle.
+
+        Regression: comp=4 (plain LZFSE) in CELM ver=1 crashes CoreUI.
+        Supported: comp=0 (uncompressed), or Apple's ver=2/3 proprietary
+        formats (comp=1 RLE, comp=3 LZVN, comp=4 LZFSE, comp=11 DMP2).
+        """
+        for min_deploy in ("10.10", "10.11", "11.0"):
+            outdir = os.path.join(self.tmpdir, f"celm_{min_deploy}")
+            compile_catalog(REF_XCASSETS, outdir, "macosx", min_deploy,
+                            app_icon="AppIcon",
+                            info_plist_path=os.path.join(outdir, "Info.plist"))
+            entries = _parse_celm_entries(os.path.join(outdir, "Assets.car"))
+            unsupported_ver1_comps = {4}  # LZFSE in ver=1 is broken
+            for e in entries:
+                if e['celm_ver'] == 1 and e['celm_comp'] in unsupported_ver1_comps:
+                    self.fail(
+                        f"{e['name']} (target {min_deploy}): "
+                        f"CELM ver=1 comp={e['celm_comp']} crashes CoreUI")
 
 
 if __name__ == "__main__":

@@ -300,7 +300,8 @@ def has_system_actool():
     return os.path.isfile(SYSTEM_ACTOOL) and os.access(SYSTEM_ACTOOL, os.X_OK)
 
 
-def compile_with_system_actool(xcassets_path, outdir, app_icon=None):
+def compile_with_system_actool(xcassets_path, outdir, app_icon=None,
+                               min_deploy="11.0"):
     """Compile an xcassets catalog using the system actool.
 
     Returns True on success, False on failure.
@@ -310,7 +311,7 @@ def compile_with_system_actool(xcassets_path, outdir, app_icon=None):
     cmd = [
         SYSTEM_ACTOOL, "--compile", outdir,
         "--platform", "macosx",
-        "--minimum-deployment-target", "11.0",
+        "--minimum-deployment-target", min_deploy,
     ]
     if app_icon:
         cmd += ["--app-icon", app_icon,
