@@ -257,3 +257,223 @@ def cleanup_test_outputs():
     """Remove all test output directories."""
     if os.path.exists(ASSETUTIL_TMPDIR):
         shutil.rmtree(ASSETUTIL_TMPDIR)
+
+
+SYSTEM_ACTOOL = "/usr/bin/actool"
+
+
+def has_system_actool():
+    return os.path.isfile(SYSTEM_ACTOOL) and os.access(SYSTEM_ACTOOL, os.X_OK)
+
+
+def compile_with_system_actool(xcassets_path, outdir, app_icon=None):
+    """Compile an xcassets catalog using the system actool.
+
+    Returns True on success, False on failure.
+    """
+    import subprocess
+    os.makedirs(outdir, exist_ok=True)
+    cmd = [
+        SYSTEM_ACTOOL, "--compile", outdir,
+        "--platform", "macosx",
+        "--minimum-deployment-target", "11.0",
+    ]
+    if app_icon:
+        cmd += ["--app-icon", app_icon,
+                "--output-partial-info-plist",
+                os.path.join(outdir, "AppIcon.Info.plist")]
+    cmd.append(xcassets_path)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    return result.returncode == 0
+
+
+def parse_car_inlk_entries(car_path):
+    """Parse all INLK (internal link) entries from a CAR file.
+
+    Returns a list of dicts with:
+      name: rendition name from CSI header
+      scale: scale factor (1 or 2)
+      inlk_attrs: dict of {token_id: value} from trailing attributes
+      padding: the single uint16 padding value (should be 0)
+      f1: first header field (should be 12)
+      f2: second header field (byte count of attr data)
+    """
+    with open(car_path, 'rb') as f:
+        data = f.read()
+
+    idx_off = struct.unpack('>I', data[16:20])[0]
+    idx_data = data[idx_off:idx_off + struct.unpack('>I', data[20:24])[0]]
+    n = struct.unpack('>I', idx_data[:4])[0]
+    blocks = {}
+    for i in range(n):
+        addr = struct.unpack('>I', idx_data[4 + i * 8:8 + i * 8])[0]
+        length = struct.unpack('>I', idx_data[8 + i * 8:12 + i * 8])[0]
+        if addr != 0 or length != 0:
+            blocks[i] = (addr, length)
+
+    def read_block(idx):
+        if idx not in blocks:
+            return b''
+        return data[blocks[idx][0]:blocks[idx][0] + blocks[idx][1]]
+
+    vars_off, vars_ln = struct.unpack('>II', data[24:32])
+    vd = data[vars_off:vars_off + vars_ln]
+    nv = struct.unpack('>I', vd[:4])[0]
+    named = {}
+    p = 4
+    for _ in range(nv):
+        bi = struct.unpack('>I', vd[p:p + 4])[0]
+        nl = vd[p + 4]
+        nm = vd[p + 5:p + 5 + nl].decode('ascii')
+        p += 5 + nl
+        named[nm] = bi
+
+    rend_tree = read_block(named['RENDITIONS'])
+    rt_root = struct.unpack('>I', rend_tree[8:12])[0]
+
+    renditions = []
+
+    def collect(block_idx):
+        nd = read_block(block_idx)
+        is_leaf = struct.unpack('>H', nd[:2])[0]
+        cnt = struct.unpack('>H', nd[2:4])[0]
+        if is_leaf:
+            pos = 12
+            for _ in range(cnt):
+                vi = struct.unpack('>I', nd[pos:pos + 4])[0]
+                ki = struct.unpack('>I', nd[pos + 4:pos + 8])[0]
+                pos += 8
+                renditions.append((read_block(ki), read_block(vi)))
+        else:
+            pos = 12
+            c = struct.unpack('>I', nd[pos:pos + 4])[0]
+            pos += 4
+            collect(c)
+            for _ in range(cnt):
+                pos += 4
+                c2 = struct.unpack('>I', nd[pos:pos + 4])[0]
+                pos += 4
+                collect(c2)
+
+    collect(rt_root)
+
+    results = []
+    for kd, vd_block in renditions:
+        if len(vd_block) < 184 or b'KLNI' not in vd_block:
+            continue
+        name = vd_block[40:168].rstrip(b'\x00').decode('ascii', errors='replace')
+        sf = struct.unpack('<I', vd_block[20:24])[0]
+
+        tlv_len = struct.unpack('<I', vd_block[168:172])[0]
+        pos = 184
+        end = 184 + tlv_len
+        while pos + 8 <= end:
+            tag = struct.unpack('<I', vd_block[pos:pos + 4])[0]
+            tlen = struct.unpack('<I', vd_block[pos + 4:pos + 8])[0]
+            if tag == 0x03F2:
+                inlk = vd_block[pos + 8:pos + 8 + tlen]
+                f1 = struct.unpack('<H', inlk[24:26])[0]
+                f2 = struct.unpack('<H', inlk[26:28])[0]
+                padding = struct.unpack('<H', inlk[28:30])[0]
+                ap = 30
+                attrs = {}
+                while ap + 4 <= 28 + f2:
+                    a_id = struct.unpack('<H', inlk[ap:ap + 2])[0]
+                    a_val = struct.unpack('<H', inlk[ap + 2:ap + 4])[0]
+                    if a_id == 0:
+                        break
+                    attrs[a_id] = a_val
+                    ap += 4
+                results.append({
+                    'name': name,
+                    'scale': sf // 100,
+                    'inlk_attrs': attrs,
+                    'padding': padding,
+                    'f1': f1,
+                    'f2': f2,
+                })
+            pos += 8 + tlen
+
+    return results
+
+
+def parse_car_atlas_keys(car_path):
+    """Parse atlas rendition keys from a CAR file.
+
+    Returns a set of (dim1, scale) tuples for atlas entries (layout 1004).
+    """
+    with open(car_path, 'rb') as f:
+        data = f.read()
+
+    idx_off = struct.unpack('>I', data[16:20])[0]
+    idx_data = data[idx_off:idx_off + struct.unpack('>I', data[20:24])[0]]
+    n = struct.unpack('>I', idx_data[:4])[0]
+    blocks = {}
+    for i in range(n):
+        addr = struct.unpack('>I', idx_data[4 + i * 8:8 + i * 8])[0]
+        length = struct.unpack('>I', idx_data[8 + i * 8:12 + i * 8])[0]
+        if addr != 0 or length != 0:
+            blocks[i] = (addr, length)
+
+    def read_block(idx):
+        if idx not in blocks:
+            return b''
+        return data[blocks[idx][0]:blocks[idx][0] + blocks[idx][1]]
+
+    vars_off, vars_ln = struct.unpack('>II', data[24:32])
+    vd = data[vars_off:vars_off + vars_ln]
+    nv = struct.unpack('>I', vd[:4])[0]
+    named = {}
+    p = 4
+    for _ in range(nv):
+        bi = struct.unpack('>I', vd[p:p + 4])[0]
+        nl = vd[p + 4]
+        nm = vd[p + 5:p + 5 + nl].decode('ascii')
+        p += 5 + nl
+        named[nm] = bi
+
+    kf = read_block(named['KEYFORMAT'])
+    kf_count = struct.unpack('<I', kf[8:12])[0]
+    tokens = [struct.unpack('<I', kf[12 + i * 4:16 + i * 4])[0] for i in range(kf_count)]
+
+    rend_tree = read_block(named['RENDITIONS'])
+    rt_root = struct.unpack('>I', rend_tree[8:12])[0]
+
+    renditions = []
+
+    def collect(block_idx):
+        nd = read_block(block_idx)
+        is_leaf = struct.unpack('>H', nd[:2])[0]
+        cnt = struct.unpack('>H', nd[2:4])[0]
+        if is_leaf:
+            pos = 12
+            for _ in range(cnt):
+                vi = struct.unpack('>I', nd[pos:pos + 4])[0]
+                ki = struct.unpack('>I', nd[pos + 4:pos + 8])[0]
+                pos += 8
+                renditions.append((read_block(ki), read_block(vi)))
+        else:
+            pos = 12
+            c = struct.unpack('>I', nd[pos:pos + 4])[0]
+            pos += 4
+            collect(c)
+            for _ in range(cnt):
+                pos += 4
+                c2 = struct.unpack('>I', nd[pos:pos + 4])[0]
+                pos += 4
+                collect(c2)
+
+    collect(rt_root)
+
+    atlas_keys = set()
+    for kd, vd_block in renditions:
+        if len(vd_block) < 40:
+            continue
+        layout = struct.unpack('<H', vd_block[36:38])[0]
+        if layout == 1004:
+            vals = struct.unpack(f'<{len(kd) // 2}H', kd)
+            tok_map = {tokens[i]: vals[i]
+                       for i in range(min(len(tokens), len(vals)))}
+            atlas_keys.add((tok_map.get(8, 0), tok_map.get(12, 0)))
+
+    return atlas_keys

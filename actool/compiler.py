@@ -137,6 +137,7 @@ def compile_catalog(xcassets_path: str, output_dir: str, platform: str,
                 x=img.x,
                 y=img.y,
                 atlas_identifier=sprite_atlas_id,
+                atlas_dim1=dim1_counter,
             )
             all_rendition_entries.append((ref_key, ref_csi))
 

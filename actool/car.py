@@ -248,34 +248,39 @@ def make_bytes_per_row_tlv(width: int, pixel_format: bytes) -> bytes:
 
 def make_inlk_tlv(x: int, y: int, width: int, height: int,
                    pixel_format: bytes, scale: int,
-                   atlas_identifier: int = 0) -> bytes:
+                   atlas_identifier: int = 0,
+                   atlas_dim1: int = 0) -> bytes:
     """Build an INLK TLV (0x03f2) for packed image references.
 
     atlas_identifier: if non-zero, this is a sprite atlas reference and the
     atlas ID is included in the trailing key attributes.
+    atlas_dim1: the Dim1 value of the target atlas rendition.
     """
     # KLNI tag + version + x + y + w + h
     inlk = struct.pack("<4sI", b"KLNI", 0)
     inlk += struct.pack("<IIII", x, y, width, height)
-    # Build trailing attribute data
-    attr_data = b""
-    attr_data += struct.pack("<HH", 0, 0)  # padding
+    # Build trailing attribute data: padding(2) + (token_id, value) pairs + terminator(2)
+    # CoreUI reads: skip 1 uint16 padding, then read pairs until token_id=0
+    attr_data = struct.pack("<H", 0)  # padding: single uint16
     attr_data += struct.pack("<HH", 1, ELEMENT_PACKED)  # Element = 9
     attr_data += struct.pack("<HH", 2, PART_REGULAR)  # Part = 181
-    attr_data += struct.pack("<HH", 12, scale)  # Scale
+    if atlas_dim1:
+        attr_data += struct.pack("<HH", 8, atlas_dim1)  # Dim1 (omitted when 0)
     if atlas_identifier:
         attr_data += struct.pack("<HH", 17, atlas_identifier)  # Identifier
+    attr_data += struct.pack("<HH", 12, scale)  # Scale
+    attr_data += struct.pack("<H", 0)  # terminator: single uint16
     # Header: constant (12) + attr data byte count
     inlk += struct.pack("<HH", 12, len(attr_data))
     inlk += attr_data
-    inlk += struct.pack("<HH", 0, 0)  # terminator
     return struct.pack("<II", 0x03F2, len(inlk)) + inlk
 
 
 def build_packed_image_csi(name: str, width: int, height: int,
                            scale: int, pixel_format: bytes,
                            x: int, y: int,
-                           atlas_identifier: int = 0) -> bytes:
+                           atlas_identifier: int = 0,
+                           atlas_dim1: int = 0) -> bytes:
     """Build a CSI for a packed image reference (layout 1003)."""
     scale_factor = scale * 100
 
@@ -283,7 +288,8 @@ def build_packed_image_csi(name: str, width: int, height: int,
     tlv = make_slices_tlv(width, height)
     tlv += make_metrics_tlv(width, height)
     tlv += make_inlk_tlv(x, y, width, height, pixel_format, scale,
-                         atlas_identifier=atlas_identifier)
+                         atlas_identifier=atlas_identifier,
+                         atlas_dim1=atlas_dim1)
     tlv += make_blend_opacity_tlv()
     tlv += make_exif_orientation_tlv()
 
