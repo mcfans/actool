@@ -115,7 +115,9 @@ def encode(pixel_data: bytes, pixel_format: bytes,
         return None
 
     bpp = _pixel_size(pixel_format)
-    row_bytes = width * bpp
+    # Row stride must match the actual pixel buffer layout (32-byte aligned)
+    exact = width * bpp
+    row_bytes = ((exact + 31) // 32) * 32
 
     # Create a mutable buffer for vImage
     src_buf = (ctypes.c_uint8 * len(pixel_data)).from_buffer_copy(pixel_data)
