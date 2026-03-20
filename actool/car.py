@@ -158,18 +158,38 @@ def make_facetkey_value(element: int, part: int, identifier: int) -> bytes:
     return buf
 
 
+def _parse_version(ver_str: str) -> tuple:
+    """Parse '10.11' or '11.0' into a comparable tuple."""
+    try:
+        return tuple(int(x) for x in ver_str.split("."))
+    except (ValueError, AttributeError):
+        return (0,)
+
+
+# LZFSE was introduced in macOS 10.11 / iOS 9.0.
+_MIN_LZFSE_VERSION = {"macosx": (10, 11), "iphoneos": (9, 0),
+                       "appletvos": (9, 0), "watchos": (2, 0)}
+
+
 def compress_data(pixel_data: bytes, pixel_format: bytes,
-                  width: int, height: int) -> bytes:
+                  width: int, height: int,
+                  min_deploy: str = "10.11",
+                  platform: str = "macosx") -> bytes:
     """Compress pixel data and return the rendition payload (CELM block).
 
     Uses CELM ver=2 with LZFSE compression (comp=4) when liblzfse is
-    available and compression reduces size. Falls back to uncompressed
-    CELM ver=1 (comp=0).
+    available, the deployment target supports LZFSE (>= macOS 10.11),
+    and compression reduces size. Falls back to uncompressed CELM ver=1
+    (comp=0).
 
     Important: CELM ver=1 comp=4 crashes CoreUI ('Can't find the correct
     chunk'). LZFSE requires CELM ver=2.
     """
-    if HAS_LZFSE and len(pixel_data) > 256:
+    deploy_ver = _parse_version(min_deploy)
+    lzfse_min = _MIN_LZFSE_VERSION.get(platform, (10, 11))
+    can_lzfse = HAS_LZFSE and deploy_ver >= lzfse_min
+
+    if can_lzfse and len(pixel_data) > 256:
         compressed = lzfse.compress(pixel_data)
         if len(compressed) < len(pixel_data):
             celm = struct.pack("<4sIII", b"MLEC", 2, 4, len(compressed))
@@ -310,7 +330,9 @@ def build_packed_image_csi(name: str, width: int, height: int,
 
 def build_packed_asset_csi(name: str, width: int, height: int,
                            scale: int, pixel_format: bytes,
-                           pixel_data: bytes) -> bytes:
+                           pixel_data: bytes,
+                           min_deploy: str = "10.11",
+                           platform: str = "macosx") -> bytes:
     """Build a CSI for a packed asset atlas (layout 1004)."""
     scale_factor = scale * 100
 
@@ -321,7 +343,8 @@ def build_packed_asset_csi(name: str, width: int, height: int,
     tlv += make_bytes_per_row_tlv(width, pixel_format)
 
     # Compress the atlas pixel data
-    rend_data = compress_data(pixel_data, pixel_format, width, height)
+    rend_data = compress_data(pixel_data, pixel_format, width, height,
+                              min_deploy=min_deploy, platform=platform)
 
     return build_csi(
         width=width, height=height, scale_factor=scale_factor,
@@ -426,6 +449,8 @@ class Rendition:
 
     has_icon: bool = True
     keyformat: list[int] = None  # Dynamic keyformat tokens
+    min_deploy: str = "10.11"  # Minimum deployment target
+    platform: str = "macosx"
 
     def build_rendition_key(self) -> bytes:
         locale_id = _hash_name(self.locale) if self.locale else 0
@@ -460,7 +485,9 @@ class Rendition:
         rend_data = b""
         if self.pixel_data:
             rend_data = compress_data(self.pixel_data, self.pixel_format,
-                                      self.width, self.height)
+                                      self.width, self.height,
+                                      min_deploy=self.min_deploy,
+                                      platform=self.platform)
 
         flags = 0
         if self.is_template:

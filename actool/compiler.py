@@ -51,10 +51,12 @@ def compile_catalog(xcassets_path: str, output_dir: str, platform: str,
     uses_dim1 = len(pack_groups) > 1
     keyformat_attrs = car.compute_keyformat(renditions, force_dim1=uses_dim1)
 
-    # Set keyformat on all renditions for correct key building
+    # Set keyformat and deployment info on all renditions
     for rend in renditions:
         rend.has_icon = has_icon
         rend.keyformat = keyformat_attrs
+        rend.min_deploy = min_deploy
+        rend.platform = platform
 
     # Build atlas textures and their references
     all_rendition_entries = []
@@ -115,6 +117,8 @@ def compile_catalog(xcassets_path: str, output_dir: str, platform: str,
             scale=scale,
             pixel_format=fmt,
             pixel_data=atlas.pixel_data,
+            min_deploy=min_deploy,
+            platform=platform,
         )
         all_rendition_entries.append((atlas_key, atlas_csi))
 

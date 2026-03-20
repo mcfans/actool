@@ -398,6 +398,25 @@ class TestCelmFormat(unittest.TestCase):
                                  f"{e['name']}: LZFSE comp=4 requires ver=2, "
                                  f"got ver={e['celm_ver']}")
 
+    def test_celm_no_lzfse_for_pre_10_11(self):
+        """LZFSE must not be used when targeting macOS < 10.11.
+
+        LZFSE was introduced in macOS 10.11. Earlier targets must use
+        uncompressed data only.
+        """
+        tmpdir = tempfile.mkdtemp(prefix="actool_celm_deploy_")
+        try:
+            outdir = os.path.join(tmpdir, "out")
+            compile_catalog(REF_XCASSETS, outdir, "macosx", "10.10",
+                            app_icon="AppIcon",
+                            info_plist_path=os.path.join(outdir, "Info.plist"))
+            entries = _parse_celm_entries(os.path.join(outdir, "Assets.car"))
+            for e in entries:
+                self.assertNotEqual(e['celm_comp'], 4,
+                                    f"{e['name']}: LZFSE used with 10.10 target")
+        finally:
+            shutil.rmtree(tmpdir)
+
     def test_celm_uncompressed_data_matches_dimensions(self):
         """For uncompressed CELM, data length must match w * h * bpp."""
         entries = _parse_celm_entries(self.car_path)
