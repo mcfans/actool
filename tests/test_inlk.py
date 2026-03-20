@@ -26,8 +26,10 @@ from tests.helpers import (
     REF_XCASSETS,
     has_system_actool,
     has_validate_car,
+    has_extract_pixels,
     compile_with_system_actool,
     make_temp_catalog,
+    extract_car_image,
     parse_car_inlk_entries,
     parse_car_atlas_keys,
     parse_car_info,
@@ -612,6 +614,119 @@ class TestCoreUIRenderingLegacyTarget(unittest.TestCase):
                     self.fail(
                         f"{e['name']} (target {min_deploy}): "
                         f"CELM ver=1 comp={e['celm_comp']} crashes CoreUI")
+
+
+@unittest.skipUnless(has_extract_pixels(), "extract_pixels tool not built")
+class TestPixelRoundtrip(unittest.TestCase):
+    """Verify extracted pixel data matches original source images.
+
+    Regression: INLK y coordinates were in top-left origin but CoreUI
+    expects bottom-left origin, causing packed images to extract pixels
+    from the wrong atlas position (shifted/swapped images).
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="actool_pixel_")
+        self.catalog = os.path.join(self.tmpdir, "Test.xcassets")
+        os.makedirs(self.catalog)
+        import json
+        with open(os.path.join(self.catalog, "Contents.json"), "w") as f:
+            json.dump({"info": {"author": "xcode", "version": 1}}, f)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir)
+
+    def _create_imageset(self, name, w, h, r_val):
+        """Create an imageset with a solid-R-channel test pattern."""
+        from PIL import Image
+        iset = os.path.join(self.catalog, f"{name}.imageset")
+        os.makedirs(iset)
+        for scale, suffix in [(1, ""), (2, "@2x")]:
+            sw, sh = w * scale, h * scale
+            img = Image.new("RGBA", (sw, sh), (r_val, 0, 0, 255))
+            img.save(os.path.join(iset, f"{name}{suffix}.png"))
+        import json
+        with open(os.path.join(iset, "Contents.json"), "w") as f:
+            json.dump({"images": [
+                {"filename": f"{name}.png", "idiom": "mac", "scale": "1x"},
+                {"filename": f"{name}@2x.png", "idiom": "mac", "scale": "2x"},
+            ], "info": {"author": "xcode", "version": 1}}, f)
+
+    def _roundtrip_check(self, images, min_deploy="11.0"):
+        """Compile, extract, and verify R channel for each image."""
+        for name, w, h, r_val in images:
+            self._create_imageset(name, w, h, r_val)
+
+        outdir = os.path.join(self.tmpdir, "out")
+        compile_catalog(self.catalog, outdir, "macosx", min_deploy)
+        car = os.path.join(outdir, "Assets.car")
+        ext = os.path.join(self.tmpdir, "ext")
+        os.makedirs(ext, exist_ok=True)
+
+        for name, w, h, r_val in images:
+            result = extract_car_image(car, name, ext)
+            for scale in [1, 2]:
+                self.assertIn(scale, result,
+                              f"{name}@{scale}x not extracted")
+                ew, eh, pixels = result[scale]
+                self.assertEqual(ew, w * scale)
+                self.assertEqual(eh, h * scale)
+                # Check R channel of first pixel (RGBA order)
+                got_r = pixels[0]
+                self.assertAlmostEqual(got_r, r_val, delta=2,
+                                       msg=f"{name}@{scale}x: R={got_r} "
+                                           f"expected={r_val}")
+
+    def test_packed_images_correct_identity(self):
+        """Each packed image extracts its own pixels, not another's.
+
+        Regression: INLK y in top-left origin caused images sorted by
+        height to extract pixels from the wrong atlas position.
+        """
+        self._roundtrip_check([
+            ("ImgA", 16, 16, 100),
+            ("ImgB", 24, 24, 150),
+            ("ImgC", 10, 14, 200),
+            ("ImgD", 32, 32, 50),
+        ])
+
+    def test_packed_images_various_sizes(self):
+        """Different image sizes all roundtrip correctly."""
+        self._roundtrip_check([
+            ("Small", 8, 8, 80),
+            ("Wide", 64, 16, 120),
+            ("Tall", 16, 64, 160),
+            ("Square", 32, 32, 200),
+            ("Odd", 13, 17, 240),
+        ])
+
+    @unittest.skipUnless(has_system_actool(), "system actool not available")
+    def test_matches_system_actool_pixels(self):
+        """Our pixel extraction matches system actool's."""
+        for name, w, h, r_val in [("A", 16, 16, 100), ("B", 24, 24, 200)]:
+            self._create_imageset(name, w, h, r_val)
+
+        our_dir = os.path.join(self.tmpdir, "ours")
+        sys_dir = os.path.join(self.tmpdir, "sys")
+        compile_catalog(self.catalog, our_dir, "macosx", "11.0")
+        compile_with_system_actool(self.catalog, sys_dir)
+
+        for name in ["A", "B"]:
+            our_ext = os.path.join(self.tmpdir, f"our_ext_{name}")
+            sys_ext = os.path.join(self.tmpdir, f"sys_ext_{name}")
+            os.makedirs(our_ext); os.makedirs(sys_ext)
+            our_result = extract_car_image(
+                os.path.join(our_dir, "Assets.car"), name, our_ext)
+            sys_result = extract_car_image(
+                os.path.join(sys_dir, "Assets.car"), name, sys_ext)
+            for scale in [1]:
+                self.assertIn(scale, our_result, f"Our {name}@{scale}x missing")
+                self.assertIn(scale, sys_result, f"Sys {name}@{scale}x missing")
+                our_r = our_result[scale][2][0]
+                sys_r = sys_result[scale][2][0]
+                self.assertAlmostEqual(our_r, sys_r, delta=2,
+                                       msg=f"{name}@{scale}x: ours R={our_r} "
+                                           f"sys R={sys_r}")
 
 
 if __name__ == "__main__":

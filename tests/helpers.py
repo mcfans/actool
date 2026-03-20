@@ -261,10 +261,40 @@ def cleanup_test_outputs():
 
 VALIDATE_CAR = os.path.join(os.path.dirname(os.path.dirname(__file__)),
                             "tools", "validate_car")
+EXTRACT_PIXELS = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                               "tools", "extract_pixels")
 
 
 def has_validate_car():
     return os.path.isfile(VALIDATE_CAR) and os.access(VALIDATE_CAR, os.X_OK)
+
+
+def has_extract_pixels():
+    return os.path.isfile(EXTRACT_PIXELS) and os.access(EXTRACT_PIXELS, os.X_OK)
+
+
+def extract_car_image(car_path, image_name, output_dir):
+    """Extract pixel data for a named image from a CAR file.
+
+    Returns dict of {scale: (width, height, rgba_bytes)} or empty if tool
+    unavailable.
+    """
+    import subprocess
+    if not has_extract_pixels():
+        return {}
+    subprocess.run([EXTRACT_PIXELS, car_path, image_name, output_dir],
+                   capture_output=True, timeout=10)
+    results = {}
+    for fname in os.listdir(output_dir):
+        if fname.startswith(image_name + "_") and fname.endswith("x.rgba"):
+            scale = int(fname.split("_")[-1].replace("x.rgba", ""))
+            path = os.path.join(output_dir, fname)
+            with open(path, 'rb') as f:
+                w = struct.unpack('<I', f.read(4))[0]
+                h = struct.unpack('<I', f.read(4))[0]
+                pixels = f.read()
+            results[scale] = (w, h, pixels)
+    return results
 
 
 def validate_car_rendering(car_path):

@@ -265,10 +265,16 @@ def make_exif_orientation_tlv(orientation: int = 1) -> bytes:
     return struct.pack("<II", 0x03EE, len(data)) + data
 
 
-def make_bytes_per_row_tlv(width: int, pixel_format: bytes) -> bytes:
-    """Build a BytesPerRow TLV (0x03EF)."""
+def aligned_bytes_per_row(width: int, pixel_format: bytes) -> int:
+    """Calculate row stride aligned to 32 bytes."""
     bpp = 4 if pixel_format == b"BGRA" else 2
-    bpr = width * bpp
+    exact = width * bpp
+    return ((exact + 31) // 32) * 32
+
+
+def make_bytes_per_row_tlv(width: int, pixel_format: bytes) -> bytes:
+    """Build a BytesPerRow TLV (0x03EF) with 32-byte row alignment."""
+    bpr = aligned_bytes_per_row(width, pixel_format)
     data = struct.pack("<I", bpr)
     return struct.pack("<II", 0x03EF, len(data)) + data
 
@@ -337,7 +343,8 @@ def build_packed_asset_csi(name: str, width: int, height: int,
     scale_factor = scale * 100
 
     # TLV section (packed assets: slices + blend + exif + bytes_per_row, NO metrics)
-    tlv = make_slices_tlv(width, height)
+    # Atlas slices must be (0,0) — non-zero dimensions interfere with INLK extraction
+    tlv = make_slices_tlv(0, 0)
     tlv += make_blend_opacity_tlv()
     tlv += make_exif_orientation_tlv()
     tlv += make_bytes_per_row_tlv(width, pixel_format)
@@ -481,10 +488,22 @@ class Rendition:
             if self.pixel_data:
                 tlv += make_bytes_per_row_tlv(self.width, self.pixel_format)
 
-        # Build rendition data
+        # Build rendition data — pad rows to 32-byte alignment
         rend_data = b""
         if self.pixel_data:
-            rend_data = compress_data(self.pixel_data, self.pixel_format,
+            pixel_data = self.pixel_data
+            bpp = 4 if self.pixel_format == b"BGRA" else 2
+            exact_bpr = self.width * bpp
+            aligned_bpr = aligned_bytes_per_row(self.width, self.pixel_format)
+            if aligned_bpr != exact_bpr and self.width > 0 and self.height > 0:
+                padded = bytearray()
+                pad = aligned_bpr - exact_bpr
+                for row in range(self.height):
+                    start = row * exact_bpr
+                    padded.extend(pixel_data[start:start + exact_bpr])
+                    padded.extend(b'\x00' * pad)
+                pixel_data = bytes(padded)
+            rend_data = compress_data(pixel_data, self.pixel_format,
                                       self.width, self.height,
                                       min_deploy=self.min_deploy,
                                       platform=self.platform)

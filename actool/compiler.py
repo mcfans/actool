@@ -132,6 +132,8 @@ def compile_catalog(xcassets_path: str, output_dir: str, platform: str,
                 scale=scale,
                 keyformat=keyformat_attrs,
             )
+            # INLK y is in bottom-left origin (CoreGraphics convention)
+            inlk_y = atlas.height - img.y - img.height
             ref_csi = car.build_packed_image_csi(
                 name=img.name,
                 width=img.width,
@@ -139,7 +141,7 @@ def compile_catalog(xcassets_path: str, output_dir: str, platform: str,
                 scale=scale,
                 pixel_format=fmt,
                 x=img.x,
-                y=img.y,
+                y=inlk_y,
                 atlas_identifier=sprite_atlas_id,
                 atlas_dim1=dim1_counter,
             )

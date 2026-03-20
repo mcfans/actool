@@ -57,18 +57,30 @@ class Atlas:
         fmt_idx = 0 if self.pixel_format == b"BGRA" else 1
         return f"ZZZZPackedAsset-{self.scale}.0.{fmt_idx}-gamut0"
 
-    def render(self):
-        """Render all packed images into a single atlas pixel buffer."""
+    @property
+    def bytes_per_row(self) -> int:
+        """Row stride in bytes, aligned to 32 bytes."""
         bpp = 4 if self.pixel_format == b"BGRA" else 2
-        buf = bytearray(self.width * self.height * bpp)
+        exact = self.width * bpp
+        return ((exact + 31) // 32) * 32
+
+    def render(self):
+        """Render all packed images into a single atlas pixel buffer.
+
+        Rows are padded to 32-byte alignment to match CoreUI's expected
+        stride. The buffer uses top-down row order; the INLK y coordinates
+        are flipped to bottom-left origin separately by the compiler.
+        """
+        bpp = 4 if self.pixel_format == b"BGRA" else 2
+        bpr = self.bytes_per_row
+        buf = bytearray(bpr * self.height)
 
         for img in self.images:
             src_stride = img.width * bpp
-            dst_stride = self.width * bpp
 
             for row in range(img.height):
                 src_off = row * src_stride
-                dst_off = (img.y + row) * dst_stride + img.x * bpp
+                dst_off = (img.y + row) * bpr + img.x * bpp
                 buf[dst_off:dst_off + src_stride] = \
                     img.pixel_data[src_off:src_off + src_stride]
 
