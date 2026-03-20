@@ -259,6 +259,40 @@ def cleanup_test_outputs():
         shutil.rmtree(ASSETUTIL_TMPDIR)
 
 
+VALIDATE_CAR = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                            "tools", "validate_car")
+
+
+def has_validate_car():
+    return os.path.isfile(VALIDATE_CAR) and os.access(VALIDATE_CAR, os.X_OK)
+
+
+def validate_car_rendering(car_path):
+    """Run validate_car to test actual pixel rendering of all images.
+
+    Returns (successes, failures, details) where details is a list of
+    (status, name) tuples. Status is 'OK', 'FAIL', or 'CRASH'.
+    """
+    import subprocess
+    result = subprocess.run(
+        [VALIDATE_CAR, car_path],
+        capture_output=True, text=True, timeout=30)
+    details = []
+    successes = 0
+    failures = 0
+    for line in result.stdout.splitlines():
+        if line.startswith("OK   "):
+            details.append(("OK", line[5:].split(" (")[0]))
+            successes += 1
+        elif line.startswith("FAIL "):
+            details.append(("FAIL", line[5:].split(" (")[0]))
+            failures += 1
+        elif line.startswith("CRASH "):
+            details.append(("CRASH", line[6:].split(" (")[0]))
+            failures += 1
+    return successes, failures, details
+
+
 SYSTEM_ACTOOL = "/usr/bin/actool"
 
 

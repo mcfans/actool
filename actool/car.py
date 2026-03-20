@@ -160,14 +160,13 @@ def make_facetkey_value(element: int, part: int, identifier: int) -> bytes:
 
 def compress_data(pixel_data: bytes, pixel_format: bytes,
                   width: int, height: int) -> bytes:
-    """Compress pixel data and return the rendition payload (CELM block)."""
-    if HAS_LZFSE and len(pixel_data) > 256:
-        compressed = lzfse.compress(pixel_data)
-        if len(compressed) < len(pixel_data):
-            # CELM with lzfse compression (type 4)
-            celm = struct.pack("<4sIII", b"MLEC", 1, 4, len(compressed))
-            return celm + compressed
-    # Fall back to uncompressed CELM
+    """Compress pixel data and return the rendition payload (CELM block).
+
+    Uses uncompressed CELM ver=1 format. CoreUI on modern macOS expects
+    either uncompressed (comp=0) or the DMP2 tile-based format (CELM ver=2,
+    comp=11) used by the system actool. Plain LZFSE (comp=4) in a CELM ver=1
+    block is NOT supported and causes 'Can't find the correct chunk' crashes.
+    """
     celm = struct.pack("<4sIII", b"MLEC", 1, 0, len(pixel_data))
     return celm + pixel_data
 
