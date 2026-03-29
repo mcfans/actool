@@ -149,147 +149,19 @@ class AssetCatalog:
         if not catalog_path.exists():
             raise FileNotFoundError(f"Asset catalog not found: {self.path}")
 
-        # Process each asset directory
+        self._parse_directory(catalog_path, renditions, facets)
+
+        return renditions, facets
+
+    def _parse_directory(self, catalog_path: Path,
+                         renditions: list, facets: dict):
+        """Parse asset entries in a directory, recursing into groups."""
         for item in sorted(catalog_path.iterdir()):
             if item.suffix == ".imageset":
-                name = item.stem
-                ident = self._get_identifier(name)
-                is_template = False
-
-                contents_path = item / "Contents.json"
-                if not contents_path.exists():
-                    continue
-
-                with open(contents_path) as f:
-                    contents = json.load(f)
-
-                # Check template rendering intent
-                props = contents.get("properties", {})
-                if props.get("template-rendering-intent") == "template":
-                    is_template = True
-
-                images = contents.get("images", [])
-                for img_info in images:
-                    filename = img_info.get("filename")
-                    if not filename:
-                        continue
-
-                    img_path = item / filename
-                    if not img_path.exists():
-                        continue
-
-                    scale_str = img_info.get("scale", "1x")
-                    scale = int(scale_str.replace("x", ""))
-
-                    idiom = img_info.get("idiom", "universal")
-                    if self.platform == "macosx" and idiom not in ("mac", "universal"):
-                        continue
-
-                    locale = img_info.get("locale", "")
-
-                    # Language filtering
-                    if locale and not self._should_include_locale(locale):
-                        continue
-
-                    if locale:
-                        self._locales_used.add(locale)
-
-                    pixel_data, width, height, pixel_format = load_image_as_bgra(
-                        str(img_path))
-
-                    rend = car.Rendition(
-                        name=filename,
-                        identifier=ident,
-                        element=car.ELEMENT_UNIVERSAL,
-                        part=car.PART_REGULAR,
-                        scale=scale,
-                        width=width,
-                        height=height,
-                        pixel_data=pixel_data,
-                        pixel_format=pixel_format,
-                        layout=car.LAYOUT_ONE_PART_SCALE,
-                        is_template=is_template,
-                        locale=locale,
-                    )
-                    renditions.append(rend)
-
-                facets[name] = (car.ELEMENT_UNIVERSAL, car.PART_REGULAR, ident)
+                self._parse_imageset(item, renditions, facets)
 
             elif item.suffix == ".appiconset":
-                if not self.app_icon:
-                    continue
-                name = item.stem
-                if name != self.app_icon:
-                    continue
-
-                ident = self._get_identifier(name)
-
-                contents_path = item / "Contents.json"
-                if not contents_path.exists():
-                    continue
-
-                with open(contents_path) as f:
-                    contents = json.load(f)
-
-                icon_renditions = []
-                images = contents.get("images", [])
-                for img_info in images:
-                    filename = img_info.get("filename")
-                    if not filename:
-                        continue
-
-                    img_path = item / filename
-                    if not img_path.exists():
-                        continue
-
-                    scale_str = img_info.get("scale", "1x")
-                    scale = int(scale_str.replace("x", ""))
-
-                    size_str = img_info.get("size", "")
-                    if "x" in size_str:
-                        point_w = int(size_str.split("x")[0])
-                    else:
-                        point_w = 0
-
-                    pixel_data, width, height, pixel_format = load_image_as_bgra(
-                        str(img_path))
-
-                    pixel_size = point_w * scale
-                    dim2 = ICON_DIM2_MAP.get(point_w, 0)
-
-                    rend = car.Rendition(
-                        name=filename,
-                        identifier=ident,
-                        element=car.ELEMENT_UNIVERSAL,
-                        part=car.PART_ICON,
-                        scale=scale,
-                        width=width,
-                        height=height,
-                        pixel_data=pixel_data,
-                        pixel_format=pixel_format,
-                        layout=car.LAYOUT_ONE_PART_SCALE,
-                        dim2=dim2,
-                    )
-                    renditions.append(rend)
-                    icon_renditions.append((rend, point_w, pixel_size))
-
-                # Add multisize image rendition (one entry per point size)
-                ms_entries = []
-                seen_point_sizes = set()
-                for rend, point_w, pixel_size in icon_renditions:
-                    if point_w not in seen_point_sizes:
-                        dim2 = ICON_DIM2_MAP.get(point_w, 0)
-                        ms_entries.append(car.MultisizeImageEntry(
-                            width=point_w,
-                            height=point_w,
-                            index=dim2,
-                        ))
-                        seen_point_sizes.add(point_w)
-
-                ms_rend = car.build_multisize_rendition(name, ident, ms_entries)
-                renditions.append(ms_rend)
-
-                facets[name] = (car.ELEMENT_UNIVERSAL, car.PART_ICON, ident)
+                self._parse_appiconset(item, renditions, facets)
 
             elif item.suffix == ".colorset":
                 self._parse_colorset(item, renditions, facets)
@@ -303,7 +175,151 @@ class AssetCatalog:
             elif item.suffix == ".imagestack":
                 self._parse_imagestack(item, renditions, facets)
 
-        return renditions, facets
+            elif item.is_dir() and not item.suffix:
+                # Plain directory = xcassets group — recurse into it
+                self._parse_directory(item, renditions, facets)
+
+    def _parse_imageset(self, item: Path, renditions: list, facets: dict):
+        """Parse a .imageset directory."""
+        name = item.stem
+        ident = self._get_identifier(name)
+        is_template = False
+
+        contents_path = item / "Contents.json"
+        if not contents_path.exists():
+            return
+
+        with open(contents_path) as f:
+            contents = json.load(f)
+
+        # Check template rendering intent
+        props = contents.get("properties", {})
+        if props.get("template-rendering-intent") == "template":
+            is_template = True
+
+        images = contents.get("images", [])
+        for img_info in images:
+            filename = img_info.get("filename")
+            if not filename:
+                continue
+
+            img_path = item / filename
+            if not img_path.exists():
+                continue
+
+            scale_str = img_info.get("scale", "1x")
+            scale = int(scale_str.replace("x", ""))
+
+            idiom = img_info.get("idiom", "universal")
+            if self.platform == "macosx" and idiom not in ("mac", "universal"):
+                continue
+
+            locale = img_info.get("locale", "")
+
+            # Language filtering
+            if locale and not self._should_include_locale(locale):
+                continue
+
+            if locale:
+                self._locales_used.add(locale)
+
+            pixel_data, width, height, pixel_format = load_image_as_bgra(
+                str(img_path))
+
+            rend = car.Rendition(
+                name=filename,
+                identifier=ident,
+                element=car.ELEMENT_UNIVERSAL,
+                part=car.PART_REGULAR,
+                scale=scale,
+                width=width,
+                height=height,
+                pixel_data=pixel_data,
+                pixel_format=pixel_format,
+                layout=car.LAYOUT_ONE_PART_SCALE,
+                is_template=is_template,
+                locale=locale,
+            )
+            renditions.append(rend)
+
+        facets[name] = (car.ELEMENT_UNIVERSAL, car.PART_REGULAR, ident)
+
+    def _parse_appiconset(self, item: Path, renditions: list, facets: dict):
+        """Parse an .appiconset directory."""
+        if not self.app_icon:
+            return
+        name = item.stem
+        if name != self.app_icon:
+            return
+
+        ident = self._get_identifier(name)
+
+        contents_path = item / "Contents.json"
+        if not contents_path.exists():
+            return
+
+        with open(contents_path) as f:
+            contents = json.load(f)
+
+        icon_renditions = []
+        images = contents.get("images", [])
+        for img_info in images:
+            filename = img_info.get("filename")
+            if not filename:
+                continue
+
+            img_path = item / filename
+            if not img_path.exists():
+                continue
+
+            scale_str = img_info.get("scale", "1x")
+            scale = int(scale_str.replace("x", ""))
+
+            size_str = img_info.get("size", "")
+            if "x" in size_str:
+                point_w = int(size_str.split("x")[0])
+            else:
+                point_w = 0
+
+            pixel_data, width, height, pixel_format = load_image_as_bgra(
+                str(img_path))
+
+            pixel_size = point_w * scale
+            dim2 = ICON_DIM2_MAP.get(point_w, 0)
+
+            rend = car.Rendition(
+                name=filename,
+                identifier=ident,
+                element=car.ELEMENT_UNIVERSAL,
+                part=car.PART_ICON,
+                scale=scale,
+                width=width,
+                height=height,
+                pixel_data=pixel_data,
+                pixel_format=pixel_format,
+                layout=car.LAYOUT_ONE_PART_SCALE,
+                dim2=dim2,
+            )
+            renditions.append(rend)
+            icon_renditions.append((rend, point_w, pixel_size))
+
+        # Add multisize image rendition (one entry per point size)
+        ms_entries = []
+        seen_point_sizes = set()
+        for rend, point_w, pixel_size in icon_renditions:
+            if point_w not in seen_point_sizes:
+                dim2 = ICON_DIM2_MAP.get(point_w, 0)
+                ms_entries.append(car.MultisizeImageEntry(
+                    width=point_w,
+                    height=point_w,
+                    index=dim2,
+                ))
+                seen_point_sizes.add(point_w)
+
+        ms_rend = car.build_multisize_rendition(name, ident, ms_entries)
+        renditions.append(ms_rend)
+
+        facets[name] = (car.ELEMENT_UNIVERSAL, car.PART_ICON, ident)
 
     def _parse_colorset(self, item_path: Path,
                         renditions: list, facets: dict):

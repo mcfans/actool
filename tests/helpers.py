@@ -23,10 +23,12 @@ def has_ref_car():
     return os.path.isfile(REF_CAR)
 
 
-def make_temp_catalog(imagesets, tmpdir=None):
+def make_temp_catalog(imagesets, tmpdir=None, groups=None):
     """Create a temporary xcassets catalog.
 
     imagesets: list of (name, mode) where mode is 'RGBA' or 'LA'.
+    groups: optional dict of {group_name: [(name, mode), ...]} for nested
+            group subdirectories.
     Returns (catalog_path, tmpdir).
     """
     if tmpdir is None:
@@ -37,18 +39,12 @@ def make_temp_catalog(imagesets, tmpdir=None):
     with open(os.path.join(catalog, "Contents.json"), "w") as f:
         json.dump({"info": {"author": "xcode", "version": 1}}, f)
 
-    for name, mode in imagesets:
-        iset = os.path.join(catalog, f"{name}.imageset")
+    def _add_imageset(parent_dir, name, mode):
+        iset = os.path.join(parent_dir, f"{name}.imageset")
         os.makedirs(iset, exist_ok=True)
-
-        if mode == "RGBA":
-            color = (200, 100, 50, 255)
-        else:
-            color = (128, 255)
-
+        color = (200, 100, 50, 255) if mode == "RGBA" else (128, 255)
         Image.new(mode, (16, 16), color).save(os.path.join(iset, f"{name}.png"))
         Image.new(mode, (32, 32), color).save(os.path.join(iset, f"{name}@2x.png"))
-
         with open(os.path.join(iset, "Contents.json"), "w") as f:
             json.dump({
                 "images": [
@@ -57,6 +53,18 @@ def make_temp_catalog(imagesets, tmpdir=None):
                 ],
                 "info": {"author": "xcode", "version": 1},
             }, f)
+
+    for name, mode in imagesets:
+        _add_imageset(catalog, name, mode)
+
+    if groups:
+        for group_name, group_imagesets in groups.items():
+            group_dir = os.path.join(catalog, group_name)
+            os.makedirs(group_dir, exist_ok=True)
+            with open(os.path.join(group_dir, "Contents.json"), "w") as f:
+                json.dump({"info": {"author": "xcode", "version": 1}}, f)
+            for name, mode in group_imagesets:
+                _add_imageset(group_dir, name, mode)
 
     return catalog, tmpdir
 

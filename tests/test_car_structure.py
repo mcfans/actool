@@ -166,5 +166,50 @@ class TestInfoPlist(unittest.TestCase):
         shutil.rmtree(tmpdir)
 
 
+class TestNestedGroups(unittest.TestCase):
+    """Test that imagesets inside group subdirectories are included.
+
+    Regression: the catalog parser only iterated top-level entries,
+    skipping group directories like 'devices/' and 'support/'.
+    """
+
+    def test_group_imagesets_included(self):
+        """Imagesets in group subdirectories appear as facets."""
+        catalog, tmpdir = make_temp_catalog(
+            [("TopLevel", "RGBA")],
+            groups={
+                "mygroup": [("Nested1", "RGBA"), ("Nested2", "RGBA")],
+            })
+        try:
+            outdir = os.path.join(tmpdir, "out")
+            compile_catalog(catalog, outdir, "macosx", "11.0")
+            info = parse_car_info(os.path.join(outdir, "Assets.car"))
+            layouts = parse_car_layouts(os.path.join(outdir, "Assets.car"))
+            # All three imagesets must be present
+            self.assertIn("TopLevel.png", layouts)
+            self.assertIn("Nested1.png", layouts)
+            self.assertIn("Nested2.png", layouts)
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_deeply_nested_groups(self):
+        """Groups nested multiple levels deep are all parsed."""
+        catalog, tmpdir = make_temp_catalog(
+            [("Root", "RGBA")],
+            groups={
+                "level1": [("L1", "RGBA")],
+                "level1/level2": [("L2", "RGBA")],
+            })
+        try:
+            outdir = os.path.join(tmpdir, "out")
+            compile_catalog(catalog, outdir, "macosx", "11.0")
+            layouts = parse_car_layouts(os.path.join(outdir, "Assets.car"))
+            self.assertIn("Root.png", layouts)
+            self.assertIn("L1.png", layouts)
+            self.assertIn("L2.png", layouts)
+        finally:
+            shutil.rmtree(tmpdir)
+
+
 if __name__ == "__main__":
     unittest.main()
