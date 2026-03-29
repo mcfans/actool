@@ -40,16 +40,18 @@ from tests.helpers import (
 class TestInlkFormat(unittest.TestCase):
     """Test INLK binary format matches what CoreUI expects."""
 
-    def setUp(self):
-        self.tmpdir = tempfile.mkdtemp(prefix="actool_inlk_")
-        self.outdir = os.path.join(self.tmpdir, "out")
-        compile_catalog(REF_XCASSETS, self.outdir, "macosx", "11.0",
+    @classmethod
+    def setUpClass(cls):
+        cls.tmpdir = tempfile.mkdtemp(prefix="actool_inlk_")
+        outdir = os.path.join(cls.tmpdir, "out")
+        compile_catalog(REF_XCASSETS, outdir, "macosx", "11.0",
                         app_icon="AppIcon",
-                        info_plist_path=os.path.join(self.outdir, "Info.plist"))
-        self.car_path = os.path.join(self.outdir, "Assets.car")
+                        info_plist_path=os.path.join(outdir, "Info.plist"))
+        cls.car_path = os.path.join(outdir, "Assets.car")
 
-    def tearDown(self):
-        shutil.rmtree(self.tmpdir)
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir)
 
     def test_inlk_padding_is_single_uint16(self):
         """Padding before attr pairs must be exactly one uint16 zero.
@@ -137,22 +139,24 @@ class TestInlkFormat(unittest.TestCase):
 class TestInlkMatchesSystemActool(unittest.TestCase):
     """Compare INLK format between our output and system actool."""
 
-    def setUp(self):
-        self.tmpdir = tempfile.mkdtemp(prefix="actool_inlk_ref_")
-        self.our_dir = os.path.join(self.tmpdir, "ours")
-        self.sys_dir = os.path.join(self.tmpdir, "system")
+    @classmethod
+    def setUpClass(cls):
+        cls.tmpdir = tempfile.mkdtemp(prefix="actool_inlk_ref_")
+        our_dir = os.path.join(cls.tmpdir, "ours")
+        sys_dir = os.path.join(cls.tmpdir, "system")
 
-        compile_catalog(REF_XCASSETS, self.our_dir, "macosx", "11.0",
+        compile_catalog(REF_XCASSETS, our_dir, "macosx", "11.0",
                         app_icon="AppIcon",
-                        info_plist_path=os.path.join(self.our_dir, "Info.plist"))
-        compile_with_system_actool(REF_XCASSETS, self.sys_dir,
+                        info_plist_path=os.path.join(our_dir, "Info.plist"))
+        compile_with_system_actool(REF_XCASSETS, sys_dir,
                                    app_icon="AppIcon")
 
-        self.our_car = os.path.join(self.our_dir, "Assets.car")
-        self.sys_car = os.path.join(self.sys_dir, "Assets.car")
+        cls.our_car = os.path.join(our_dir, "Assets.car")
+        cls.sys_car = os.path.join(sys_dir, "Assets.car")
 
-    def tearDown(self):
-        shutil.rmtree(self.tmpdir)
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir)
 
     def test_same_inlk_padding_format(self):
         """Our padding value matches system actool (single uint16 = 0)."""
@@ -228,23 +232,25 @@ class TestInlkMatchesSystemActool(unittest.TestCase):
 class TestInlkMixedFormats(unittest.TestCase):
     """Test INLK resolution with mixed pixel formats (multiple atlas groups)."""
 
-    def setUp(self):
-        self.tmpdir = tempfile.mkdtemp(prefix="actool_inlk_mixed_")
+    @classmethod
+    def setUpClass(cls):
+        cls.tmpdir = tempfile.mkdtemp(prefix="actool_inlk_mixed_")
         catalog, _ = make_temp_catalog(
             [("RgbA", "RGBA"), ("RgbB", "RGBA"),
              ("GrayA", "LA"), ("GrayB", "LA")],
-            self.tmpdir)
-        self.our_dir = os.path.join(self.tmpdir, "ours")
-        self.sys_dir = os.path.join(self.tmpdir, "system")
+            cls.tmpdir)
+        our_dir = os.path.join(cls.tmpdir, "ours")
+        sys_dir = os.path.join(cls.tmpdir, "system")
 
-        compile_catalog(catalog, self.our_dir, "macosx", "11.0")
-        compile_with_system_actool(catalog, self.sys_dir)
+        compile_catalog(catalog, our_dir, "macosx", "11.0")
+        compile_with_system_actool(catalog, sys_dir)
 
-        self.our_car = os.path.join(self.our_dir, "Assets.car")
-        self.sys_car = os.path.join(self.sys_dir, "Assets.car")
+        cls.our_car = os.path.join(our_dir, "Assets.car")
+        cls.sys_car = os.path.join(sys_dir, "Assets.car")
 
-    def tearDown(self):
-        shutil.rmtree(self.tmpdir)
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir)
 
     def test_mixed_format_inlk_all_resolve(self):
         """INLK links resolve when multiple pixel formats create separate atlases."""
@@ -366,16 +372,18 @@ class TestCelmFormat(unittest.TestCase):
     for CELM ver=1.
     """
 
-    def setUp(self):
-        self.tmpdir = tempfile.mkdtemp(prefix="actool_celm_")
-        self.outdir = os.path.join(self.tmpdir, "out")
-        compile_catalog(REF_XCASSETS, self.outdir, "macosx", "11.0",
+    @classmethod
+    def setUpClass(cls):
+        cls.tmpdir = tempfile.mkdtemp(prefix="actool_celm_")
+        outdir = os.path.join(cls.tmpdir, "out")
+        compile_catalog(REF_XCASSETS, outdir, "macosx", "11.0",
                         app_icon="AppIcon",
-                        info_plist_path=os.path.join(self.outdir, "Info.plist"))
-        self.car_path = os.path.join(self.outdir, "Assets.car")
+                        info_plist_path=os.path.join(outdir, "Info.plist"))
+        cls.car_path = os.path.join(outdir, "Assets.car")
 
-    def tearDown(self):
-        shutil.rmtree(self.tmpdir)
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir)
 
     def test_celm_no_ver1_lzfse(self):
         """CELM ver=1 must NOT use comp=4 (LZFSE).
