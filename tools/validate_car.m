@@ -189,8 +189,25 @@ int main(int argc, const char *argv[]) {
                             failures++;
                         }
                     } else {
-                        printf("FAIL %s (no images returned)\n", [name UTF8String]);
-                        failures++;
+                        // Not an image rendition - might be a named color.
+                        // Try CUICatalog's color lookup before declaring failure.
+                        BOOL handled = NO;
+                        SEL colorSel = NSSelectorFromString(@"colorWithName:displayGamut:");
+                        if ([catalog respondsToSelector:colorSel]) {
+                            // displayGamut: 0=SRGB, 1=P3
+                            typedef id (*ColorFn)(id, SEL, NSString *, long);
+                            ColorFn fn = (ColorFn)[catalog methodForSelector:colorSel];
+                            id namedColor = fn(catalog, colorSel, name, 0);
+                            if (namedColor) {
+                                printf("OK   %s (color)\n", [name UTF8String]);
+                                successes++;
+                                handled = YES;
+                            }
+                        }
+                        if (!handled) {
+                            printf("FAIL %s (no images returned)\n", [name UTF8String]);
+                            failures++;
+                        }
                     }
                 } else {
                     printf("SKIP %s (imagesWithName: not available)\n", [name UTF8String]);
