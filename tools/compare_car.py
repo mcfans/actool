@@ -205,6 +205,38 @@ def _parse_csi(vd: bytes) -> dict | None:
     if 0x03EF in tlvs and len(tlvs[0x03EF]) >= 4:
         bpr = struct.unpack_from('<I', tlvs[0x03EF], 0)[0]
 
+    # Slices TLV: count, x, y, w, h
+    slices = None
+    if 0x03E9 in tlvs and len(tlvs[0x03E9]) >= 20:
+        sd = tlvs[0x03E9]
+        slices = struct.unpack_from('<IIIII', sd, 0)
+
+    # Metrics TLV: count, top, left, bottom, right, w, h
+    metrics = None
+    if 0x03EB in tlvs and len(tlvs[0x03EB]) >= 28:
+        md = tlvs[0x03EB]
+        metrics = struct.unpack_from('<IIIIIII', md, 0)
+
+    # Blend TLV: mode, opacity
+    blend = None
+    if 0x03EC in tlvs and len(tlvs[0x03EC]) >= 8:
+        bd = tlvs[0x03EC]
+        blend = (struct.unpack_from('<I', bd, 0)[0],
+                 struct.unpack_from('<f', bd, 4)[0])
+
+    # Multisize image data (MSIS)
+    multisize = None
+    if layout == 1010 and rend_len >= 12 and rend_raw[:4] == b"SISM":
+        ms_ver = struct.unpack_from('<I', rend_raw, 4)[0]
+        ms_count = struct.unpack_from('<I', rend_raw, 8)[0]
+        ms_entries = []
+        for i in range(ms_count):
+            off = 12 + i * 12
+            if off + 12 <= rend_len:
+                mw, mh, midx = struct.unpack_from('<III', rend_raw, off)
+                ms_entries.append((mw, mh, midx))
+        multisize = {"version": ms_ver, "entries": ms_entries}
+
     return {
         "name": name,
         "width": width,
@@ -226,6 +258,10 @@ def _parse_csi(vd: bytes) -> dict | None:
         "inlk": inlk,
         "color": color,
         "bpr": bpr,
+        "slices": slices,
+        "metrics": metrics,
+        "blend": blend,
+        "multisize": multisize,
     }
 
 
@@ -343,6 +379,19 @@ def parse_car(path: str) -> dict:
                     csi["key_raw"] = key_bytes.hex()
                     renditions.append(csi)
 
+    # Parse APPEARANCEKEYS
+    appearance_keys = {}
+    if "APPEARANCEKEYS" in named:
+        tree = read_block(named["APPEARANCEKEYS"])
+        if len(tree) >= 12:
+            root = struct.unpack('>I', tree[8:12])[0]
+            for key_bytes, val_bytes in _walk_tree(read_block, root):
+                aname = key_bytes.rstrip(b'\x00').decode('ascii',
+                                                         errors='replace')
+                if len(val_bytes) >= 2:
+                    appearance_keys[aname] = struct.unpack_from(
+                        '<H', val_bytes, 0)[0]
+
     return {
         "path": path,
         "file_size": len(data),
@@ -352,6 +401,7 @@ def parse_car(path: str) -> dict:
         "metadata": metadata,
         "facets": facets,
         "renditions": renditions,
+        "appearance_keys": appearance_keys,
     }
 
 
@@ -530,6 +580,16 @@ def compare_cars(car_a: dict, car_b: dict, *,
                 "b": vb,
             })
 
+    # Rendition count consistency
+    hdr_count_a = car_a["carheader"].get("renditionCount", 0)
+    hdr_count_b = car_b["carheader"].get("renditionCount", 0)
+    actual_a = len(car_a["renditions"])
+    actual_b = len(car_b["renditions"])
+    if hdr_count_a != actual_a:
+        diffs.append({"section": "carheader", "field": "renditionCount",
+                       "a": f"header={hdr_count_a} actual={actual_a}",
+                       "b": f"header={hdr_count_b} actual={actual_b}"})
+
     for field in ("deploymentPlatform", "deploymentPlatformVersion"):
         va = car_a["metadata"].get(field)
         vb = car_b["metadata"].get(field)
@@ -557,6 +617,16 @@ def compare_cars(car_a: dict, car_b: dict, *,
             "section": "named_blocks",
             "only_a": sorted(blocks_a - blocks_b),
             "only_b": sorted(blocks_b - blocks_a),
+        })
+
+    # --- Appearance keys ---
+    ak_a = car_a.get("appearance_keys", {})
+    ak_b = car_b.get("appearance_keys", {})
+    if ak_a != ak_b:
+        diffs.append({
+            "section": "appearance_keys",
+            "a": ak_a,
+            "b": ak_b,
         })
 
     # --- Facets ---
@@ -759,7 +829,7 @@ def _compare_rendition(ra: dict, rb: dict) -> list[dict]:
     if comp_a != comp_b:
         issues.append({"field": "compression", "a": comp_a, "b": comp_b})
 
-    # INLK comparison (skip coordinate values — packing can differ)
+    # INLK comparison (skip x/y coordinates — packing layout can differ)
     inlk_a = ra.get("inlk")
     inlk_b = rb.get("inlk")
     if (inlk_a is None) != (inlk_b is None):
@@ -773,6 +843,30 @@ def _compare_rendition(ra: dict, rb: dict) -> list[dict]:
         if inlk_a["f1"] != inlk_b["f1"]:
             issues.append({"field": "inlk_f1",
                            "a": inlk_a["f1"], "b": inlk_b["f1"]})
+        # Compare INLK attributes (element, part, scale, identifier)
+        # excluding dim1 which varies with packing layout
+        attrs_a = {k: v for k, v in inlk_a.get("attrs", {}).items()
+                   if k != 8}  # exclude Dim1
+        attrs_b = {k: v for k, v in inlk_b.get("attrs", {}).items()
+                   if k != 8}
+        if attrs_a != attrs_b:
+            issues.append({"field": "inlk_attrs",
+                           "a": attrs_a, "b": attrs_b})
+
+    # Slices TLV
+    if ra.get("slices") != rb.get("slices"):
+        issues.append({"field": "slices",
+                        "a": ra.get("slices"), "b": rb.get("slices")})
+
+    # Metrics TLV
+    if ra.get("metrics") != rb.get("metrics"):
+        issues.append({"field": "metrics",
+                        "a": ra.get("metrics"), "b": rb.get("metrics")})
+
+    # Blend TLV
+    if ra.get("blend") != rb.get("blend"):
+        issues.append({"field": "blend",
+                        "a": ra.get("blend"), "b": rb.get("blend")})
 
     # Color comparison
     if ra.get("color") and rb.get("color"):
@@ -785,6 +879,18 @@ def _compare_rendition(ra: dict, rb: dict) -> list[dict]:
             issues.append({"field": "color_components",
                            "a": list(ca["components"]),
                            "b": list(cb["components"])})
+
+    # Multisize image entries
+    ms_a = ra.get("multisize")
+    ms_b = rb.get("multisize")
+    if (ms_a is None) != (ms_b is None):
+        issues.append({"field": "multisize",
+                        "a": "present" if ms_a else "absent",
+                        "b": "present" if ms_b else "absent"})
+    elif ms_a and ms_b:
+        if ms_a["entries"] != ms_b["entries"]:
+            issues.append({"field": "multisize_entries",
+                           "a": ms_a["entries"], "b": ms_b["entries"]})
 
     # Data size (informational for lossy — not a hard diff)
     if ra["rend_len"] != rb["rend_len"]:
@@ -854,6 +960,9 @@ def _format_text(report: dict, *, quiet: bool = False,
                         pr(f"[facets] only in A: {diff['only_a']}")
                     if diff.get("only_b"):
                         pr(f"[facets] only in B: {diff['only_b']}")
+
+            elif section == "appearance_keys":
+                pr(f"[appearance_keys] A={diff['a']}  B={diff['b']}")
 
             elif section == "renditions":
                 rtype = diff.get("type")

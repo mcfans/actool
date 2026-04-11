@@ -164,6 +164,8 @@ def is_failure(report: dict, min_psnr: float = 20.0) -> bool:
         if section == "facets":
             if diff.get("only_a") or diff.get("only_b"):
                 return True
+        if section == "appearance_keys":
+            return True
     return False
 
 
