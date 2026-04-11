@@ -1,0 +1,14 @@
+[
+  {
+    "url": "https://github.com/transmission/transmission.git",
+    "paths": [
+      "macosx/Images/Images.xcassets"
+    ]
+  },
+  {
+    "url": "https://github.com/iina/iina.git",
+    "paths": [
+      "iina/Assets.xcassets"
+    ]
+  },
+]
