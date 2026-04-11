@@ -274,3 +274,6 @@ and create an identical archive compared to the system version.
 You can use /usr/bin/actool which will call the system version. Don't try to use it to read/write in /tmp and other places which may be shared - use local subdirectories.
 
 You can create tools to help the analysis, comparison, compiling, etc. but the main app should have the cli and arguments compatible with the original.
+
+Use unit tests for specific new functionality, `tests/test_regressions.py` for checking the full flow of things that just got fixed, and run `tools/validate_repos.py` for checking results match against multiple third party repositories.
+Don't use comments that repeat the code logic. Only use comments for details about why the code is there.
