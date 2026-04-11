@@ -318,9 +318,17 @@ def aligned_bytes_per_row(width: int, pixel_format: bytes) -> int:
     return ((exact + 31) // 32) * 32
 
 
-def make_bytes_per_row_tlv(width: int, pixel_format: bytes) -> bytes:
-    """Build a BytesPerRow TLV (0x03EF) with 32-byte row alignment."""
-    bpr = aligned_bytes_per_row(width, pixel_format)
+def make_bytes_per_row_tlv(width: int, pixel_format: bytes,
+                           aligned: bool = True) -> bytes:
+    """Build a BytesPerRow TLV (0x03EF).
+
+    When aligned=True (packed atlases), uses 32-byte row alignment.
+    When aligned=False (inline images), uses exact width*4 stride.
+    """
+    if aligned:
+        bpr = aligned_bytes_per_row(width, pixel_format)
+    else:
+        bpr = width * 4
     data = struct.pack("<I", bpr)
     return struct.pack("<II", 0x03EF, len(data)) + data
 
@@ -541,25 +549,14 @@ class Rendition:
             tlv += make_blend_opacity_tlv()
             tlv += make_exif_orientation_tlv()
             if self.pixel_data:
-                tlv += make_bytes_per_row_tlv(self.width, self.pixel_format)
+                tlv += make_bytes_per_row_tlv(self.width, self.pixel_format,
+                                              aligned=False)
 
-        # Build rendition data — pad rows to 32-byte alignment.
-        # For BGRA (4 bpp) and GA8 (2 bpp), rows are padded to the
-        # native bpp-based aligned stride.
+        # Inline images use exact width*bpp stride (no padding).
+        # Pixel data is passed directly to the compressor.
         rend_data = b""
         if self.pixel_data:
             pixel_data = self.pixel_data
-            actual_bpp = 4 if self.pixel_format == b"BGRA" else 2
-            exact_bpr = self.width * actual_bpp
-            aligned_bpr = ((exact_bpr + 31) // 32) * 32
-            if aligned_bpr != exact_bpr and self.width > 0 and self.height > 0:
-                padded = bytearray()
-                pad = aligned_bpr - exact_bpr
-                for row in range(self.height):
-                    start = row * exact_bpr
-                    padded.extend(pixel_data[start:start + exact_bpr])
-                    padded.extend(b'\x00' * pad)
-                pixel_data = bytes(padded)
             # GA8 inline images use DMP2 ver=0; BGRA inline uses LZFSE
             use_dmp2 = self.pixel_format == b" 8AG"
             rend_data = compress_data(pixel_data, self.pixel_format,

@@ -151,11 +151,6 @@ def is_failure(report: dict, min_psnr: float = 20.0) -> bool:
                     # When we fall back to uncompressed, that's expected.
                     if field == "compression" and b_val == "uncompressed":
                         continue
-                    # Pre-10.11 system actool uses width*4 bpr without
-                    # 32-byte alignment. Our bpr is always >= system's.
-                    if (field == "bpr" and isinstance(a_val, int)
-                            and isinstance(b_val, int) and b_val >= a_val):
-                        continue
                     # Data size naturally differs with different compression
                     if field == "rend_size":
                         continue
