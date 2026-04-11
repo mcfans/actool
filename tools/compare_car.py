@@ -488,15 +488,19 @@ _COMP_NAMES = {
 
 
 def _celm_desc(celm: dict | None) -> str:
-    """Short description of compression."""
+    """Short description of compression, including CELM version.
+
+    The CELM version matters for correctness — e.g. DMP2 with ver=0 vs
+    ver=2 changes how CoreUI interprets the pixel format.
+    """
     if celm is None:
         return "none"
     comp = celm.get("comp", 0)
     ver = celm.get("ver", 0)
-    name = _COMP_NAMES.get(comp)
-    if name:
-        return name
-    return f"comp={comp}/ver={ver}"
+    name = _COMP_NAMES.get(comp, f"comp={comp}")
+    if ver == 0 and comp == 0:
+        return name  # uncompressed ver=0 is the default
+    return f"{name}/ver={ver}"
 
 
 def _rendition_sort_key(r):

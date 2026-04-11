@@ -32,7 +32,7 @@ SYSTEM_ACTOOL = "/usr/bin/actool"
 #   < 10.11  → uncompressed
 #   10.11    → LZFSE
 #   11.0     → DMP2
-DEPLOY_TARGETS = ["10.9", "10.11", "11.0"]
+DEPLOY_TARGETS = ["10.9", "10.11", "11.0", "14.0"]
 
 
 def repo_slug(url: str) -> str:
@@ -147,11 +147,13 @@ def is_failure(report: dict, min_psnr: float = 20.0) -> bool:
                     field = iss.get("field", "")
                     a_val = iss.get("a")
                     b_val = iss.get("b")
-                    # Packed atlas textures are internal — different
-                    # packing layouts produce different dimensions, bpr,
-                    # and compression sizes. Only the extracted images
-                    # (pixels) matter.
-                    if layout == "packed_atlas":
+                    # Packed atlas textures can have different packing
+                    # layouts, so dimensions, stride, and data size are
+                    # expected to vary. But pixel format, compression
+                    # envelope, and colorspace must still match — a wrong
+                    # CELM version or pixel format causes rendering bugs.
+                    if layout == "packed_atlas" and field in (
+                            "width", "height", "bpr", "rend_size"):
                         continue
                     # Data size naturally varies
                     if field == "rend_size":
@@ -161,6 +163,14 @@ def is_failure(report: dict, min_psnr: float = 20.0) -> bool:
                             "rle", "uncompressed"}:
                         continue
                     return True
+        if section == "renditions" and diff.get("type") in (
+                "only_in_a", "only_in_b"):
+            for entry in diff.get("entries", []):
+                layout = entry.get("layout", "")
+                # Packed atlas counts/names vary with packing layout
+                if layout == "packed_atlas":
+                    continue
+                return True
         if section == "facets":
             if diff.get("only_a") or diff.get("only_b"):
                 return True
