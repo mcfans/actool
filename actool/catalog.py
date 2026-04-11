@@ -297,6 +297,24 @@ class AssetCatalog:
             if locale:
                 self._locales_used.add(locale)
 
+            # PDF files are stored as raw data (layout 9), not rasterized
+            if filename.lower().endswith(".pdf"):
+                with open(img_path, "rb") as pdf_f:
+                    pdf_data = pdf_f.read()
+                csi = car.build_pdf_csi(filename, pdf_data)
+                rend = car.Rendition(
+                    name=filename,
+                    identifier=ident,
+                    element=car.ELEMENT_UNIVERSAL,
+                    part=car.PART_REGULAR,
+                    scale=1,
+                    layout=car.LAYOUT_PDF,
+                    pixel_format=car.PIXELFMT_PDF,
+                )
+                rend._csi_override = csi
+                renditions.append(rend)
+                continue
+
             pixel_data, width, height, pixel_format = load_image_as_bgra(
                 str(img_path), force_bgra=self._force_bgra)
 

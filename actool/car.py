@@ -41,6 +41,7 @@ PART_REGULAR = 181  # 0xB5
 PART_COLOR = 217  # 0xD9 - color rendition
 PART_SPRITE_ATLAS = 127  # 0x7F - sprite atlas metadata
 
+LAYOUT_PDF = 9
 LAYOUT_ONE_PART_SCALE = 12
 LAYOUT_RAW_DATA = 1000
 LAYOUT_PACKED_IMAGE = 1003
@@ -51,6 +52,7 @@ LAYOUT_MULTISIZE_IMAGE = 1010
 
 # Pixel format for raw data
 PIXELFMT_DATA = b"ATAD"  # 'DATA' as LE uint32
+PIXELFMT_PDF = b" FDP"   # 'PDF ' as LE uint32
 
 
 def compute_keyformat(renditions, force_dim1: bool = False) -> list[int]:
@@ -491,6 +493,29 @@ def build_data_csi(name: str, raw_data: bytes) -> bytes:
         pixel_format=PIXELFMT_DATA,
         layout=LAYOUT_RAW_DATA, name="CoreStructuredImage",
         tlv_data=tlv, rendition_data=rawd,
+        bitmaplist_unknown=1,
+    )
+
+
+def build_pdf_csi(filename: str, pdf_data: bytes) -> bytes:
+    """Build a CSI for a PDF image rendition (layout 9).
+
+    The system actool stores PDF images with their original filename,
+    RAWD-wrapped raw bytes, pixel format ' FDP', and layout 9.
+    """
+    rawd = struct.pack("<4sII", b"DWAR", 0, len(pdf_data))
+    rawd += pdf_data
+
+    tlv = make_blend_opacity_tlv()
+    tlv += make_exif_orientation_tlv()
+
+    return build_csi(
+        width=0, height=0, scale_factor=0,
+        pixel_format=PIXELFMT_PDF,
+        layout=LAYOUT_PDF, name=filename,
+        tlv_data=tlv, rendition_data=rawd,
+        rendition_flags=0x04,  # bitmapEncoding=1
+        colorspace_id=0,
         bitmaplist_unknown=1,
     )
 

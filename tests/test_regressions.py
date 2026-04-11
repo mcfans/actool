@@ -318,3 +318,141 @@ class TestInlineBytesPerRow(unittest.TestCase):
                                              f"not 32-byte aligned")
         finally:
             shutil.rmtree(tmpdir)
+
+
+def _make_catalog_with_pdf(tmpdir, imagesets):
+    """Create an xcassets catalog with PDF and/or PNG imagesets.
+
+    imagesets: list of (name, ext) where ext is 'pdf' or 'png'.
+    For pdf: creates a minimal valid PDF file.
+    For png: creates a small RGBA image.
+    """
+    import json
+    catalog = os.path.join(tmpdir, "Test.xcassets")
+    os.makedirs(catalog, exist_ok=True)
+    with open(os.path.join(catalog, "Contents.json"), "w") as f:
+        json.dump({"info": {"author": "xcode", "version": 1}}, f)
+
+    # Minimal valid PDF
+    pdf_bytes = (
+        b"%PDF-1.0\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
+        b"2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n"
+        b"3 0 obj<</Type/Page/MediaBox[0 0 16 16]/Parent 2 0 R>>endobj\n"
+        b"xref\n0 4\n0000000000 65535 f \n0000000009 00000 n \n"
+        b"0000000058 00000 n \n0000000115 00000 n \n"
+        b"trailer<</Size 4/Root 1 0 R>>\nstartxref\n190\n%%EOF\n"
+    )
+
+    for name, ext in imagesets:
+        iset = os.path.join(catalog, f"{name}.imageset")
+        os.makedirs(iset)
+        filename = f"{name}.{ext}"
+        if ext == "pdf":
+            with open(os.path.join(iset, filename), "wb") as f:
+                f.write(pdf_bytes)
+            imgs = [{"filename": filename, "idiom": "universal"}]
+        else:
+            Image.new("RGBA", (16, 16), (100, 50, 25, 255)).save(
+                os.path.join(iset, filename))
+            Image.new("RGBA", (32, 32), (100, 50, 25, 255)).save(
+                os.path.join(iset, f"{name}@2x.{ext}"))
+            imgs = [
+                {"filename": filename, "idiom": "mac", "scale": "1x"},
+                {"filename": f"{name}@2x.{ext}", "idiom": "mac",
+                 "scale": "2x"},
+            ]
+        with open(os.path.join(iset, "Contents.json"), "w") as f:
+            json.dump({
+                "images": imgs,
+                "info": {"author": "xcode", "version": 1},
+            }, f)
+
+    return catalog
+
+
+class TestPdfImagesets(unittest.TestCase):
+    """PDF images in imagesets must not crash the compiler.
+
+    Regression: PIL.Image.open() on a PDF file raised
+    UnidentifiedImageError, causing the entire catalog compilation to
+    fail with no output.
+    """
+
+    def test_pdf_imageset_compiles(self):
+        """Catalog with a PDF imageset produces an Assets.car."""
+        tmpdir = tempfile.mkdtemp(prefix="actool_pdf_")
+        try:
+            catalog = _make_catalog_with_pdf(tmpdir, [("Icon", "pdf")])
+            outdir = os.path.join(tmpdir, "out")
+            compile_catalog(catalog, outdir, "macosx", "11.0")
+            self.assertTrue(
+                os.path.isfile(os.path.join(outdir, "Assets.car")),
+                "Assets.car should be produced for PDF imagesets")
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_mixed_pdf_and_png_compiles(self):
+        """Catalog with both PDF and PNG imagesets compiles fully."""
+        tmpdir = tempfile.mkdtemp(prefix="actool_mix_")
+        try:
+            catalog = _make_catalog_with_pdf(
+                tmpdir, [("Vec", "pdf"), ("Raster", "png")])
+            outdir = os.path.join(tmpdir, "out")
+            compile_catalog(catalog, outdir, "macosx", "11.0")
+            car = os.path.join(outdir, "Assets.car")
+            self.assertTrue(os.path.isfile(car))
+            csi = parse_car_csi_by_name(car)
+            # PNG images should still be present and valid
+            self.assertIn("Raster.png", csi)
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_pdf_stored_as_layout_9(self):
+        """PDF imageset creates a layout-9 rendition with PDF pixel format."""
+        tmpdir = tempfile.mkdtemp(prefix="actool_pdf9_")
+        try:
+            catalog = _make_catalog_with_pdf(tmpdir, [("Icon", "pdf")])
+            outdir = os.path.join(tmpdir, "out")
+            compile_catalog(catalog, outdir, "macosx", "11.0")
+            csi = parse_car_csi_by_name(os.path.join(outdir, "Assets.car"))
+            entries = csi.get("Icon.pdf", [])
+            self.assertTrue(len(entries) > 0, "PDF rendition should exist")
+            pdf_entry = entries[0]
+            self.assertEqual(pdf_entry["layout"], 9,
+                             "PDF should use layout 9")
+            self.assertEqual(pdf_entry["pixel_format"], b" FDP",
+                             "PDF should use ' FDP' pixel format")
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_pdf_colorspace_zero(self):
+        """PDF renditions must have colorspace_id=0."""
+        tmpdir = tempfile.mkdtemp(prefix="actool_pdfcs_")
+        try:
+            catalog = _make_catalog_with_pdf(tmpdir, [("Icon", "pdf")])
+            outdir = os.path.join(tmpdir, "out")
+            compile_catalog(catalog, outdir, "macosx", "11.0")
+            csi = parse_car_csi_by_name(os.path.join(outdir, "Assets.car"))
+            pdf_entry = csi["Icon.pdf"][0]
+            self.assertEqual(pdf_entry["cs"], 0,
+                             "PDF rendition colorspace should be 0")
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_pdf_data_preserved(self):
+        """The raw PDF data is preserved inside the RAWD wrapper."""
+        tmpdir = tempfile.mkdtemp(prefix="actool_pdfraw_")
+        try:
+            catalog = _make_catalog_with_pdf(tmpdir, [("Icon", "pdf")])
+            outdir = os.path.join(tmpdir, "out")
+            compile_catalog(catalog, outdir, "macosx", "11.0")
+            csi = parse_car_csi_by_name(os.path.join(outdir, "Assets.car"))
+            rend_data = csi["Icon.pdf"][0]["rend"]
+            # RAWD header: "DWAR" + ver(4) + len(4) + data
+            self.assertEqual(rend_data[:4], b"DWAR")
+            data_len = struct.unpack_from("<I", rend_data, 8)[0]
+            pdf_data = rend_data[12:12 + data_len]
+            self.assertTrue(pdf_data.startswith(b"%PDF"),
+                            "RAWD payload should contain the PDF")
+        finally:
+            shutil.rmtree(tmpdir)
