@@ -196,15 +196,12 @@ def compress_data(pixel_data: bytes, pixel_format: bytes,
                   dmp2_inline: bool = False) -> bytes:
     """Compress pixel data and return the rendition payload (CELM block).
 
-    Compression selection (matching system actool behaviour):
+    Compression selection:
     - macOS >= 11.0 with allow_dmp2: DMP2 via vImage
       - dmp2_inline=True: CELM ver=0, raw DMP2 (for inline images)
-      - dmp2_inline=False: CELM ver=2 with sub-header (for packed atlases)
-    - macOS >= 10.11: LZFSE (CELM ver=2, comp=4)
-    - Older: Uncompressed (CELM ver=1, comp=0)
-
-    Important: CELM ver=1 comp=4 crashes CoreUI ('Can't find the correct
-    chunk'). LZFSE requires CELM ver=2.
+      - dmp2_inline=False: CELM ver=0 with sub-header (for packed atlases)
+    - All targets: gzip (CELM ver=0, comp=2) for data > 256 bytes
+    - Fallback: uncompressed (CELM ver=0, comp=0)
     """
     from . import deepmap2
 
@@ -219,13 +216,20 @@ def compress_data(pixel_data: bytes, pixel_format: bytes,
                 return deepmap2.make_celm_dmp2(dmp2_data, pixel_format,
                                                inline=dmp2_inline)
 
-    # LZFSE compression is disabled because the system actool uses a
-    # chunked KCBC container format that we don't implement. Our raw
-    # LZFSE (CELM ver=2 comp=4) loses the alpha channel when decoded
-    # by CoreUI. For macOS >= 11.0, DMP2 compression (above) is used
-    # instead.
+    # Gzip compression (CELM ver=0, comp=2).
+    # The system actool uses gzip for pre-LZFSE targets (macOS < 10.11)
+    # and KCBC-chunked LZFSE for >= 10.11.  We use gzip for both since
+    # we don't implement the KCBC chunked container, and CoreUI decodes
+    # gzip at all deployment targets.
+    if len(pixel_data) > 256:
+        import zlib
+        gz = zlib.compress(pixel_data, wbits=15 + 16)  # gzip format
+        if len(gz) < len(pixel_data):
+            celm = struct.pack("<4sIII", b"MLEC", 0, 2, len(gz))
+            return celm + gz
+
     # Uncompressed fallback
-    celm = struct.pack("<4sIII", b"MLEC", 1, 0, len(pixel_data))
+    celm = struct.pack("<4sIII", b"MLEC", 0, 0, len(pixel_data))
     return celm + pixel_data
 
 
@@ -611,13 +615,8 @@ class Rendition:
         if intent < 0:  # auto-detect from is_template / default
             intent = 2 if self.is_template else 4
         flags = intent << 2
-
-        # isOpaque flag (bit 1): set if all alpha values are 255
-        if self.pixel_data and self.width > 0 and self.height > 0:
-            is_opaque = _check_opaque(self.pixel_data, self.pixel_format,
-                                      self.width, self.height)
-            if is_opaque:
-                flags |= 0x02
+        # Note: the isOpaque flag (bit 1) is never set by the system
+        # actool, even for fully-opaque images.  We match that behaviour.
 
         return build_csi(
             width=self.width,

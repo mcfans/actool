@@ -148,10 +148,11 @@ def is_failure(report: dict, min_psnr: float = 20.0) -> bool:
                 for iss in entry.get("issues", []):
                     field = iss.get("field", "")
                     b_val = iss.get("b")
-                    # We don't implement the system's legacy compression
-                    # formats (zlib comp=1, RLE comp=2, KCBC-chunked LZFSE).
-                    # When we fall back to uncompressed, that's expected.
-                    if field == "compression" and b_val == "uncompressed":
+                    # We use gzip where the system uses RLE (comp=1),
+                    # KCBC-chunked LZFSE, or DMP2 for inline images.
+                    # These are lossless format differences, not bugs.
+                    if field == "compression" and b_val in (
+                            "uncompressed", "gzip"):
                         continue
                     # Data size naturally differs with different compression
                     if field == "rend_size":

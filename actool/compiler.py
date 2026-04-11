@@ -409,13 +409,8 @@ def _write_info_plist(path: str, app_icon: str = None,
 def _compute_rendition_flags(img) -> int:
     """Compute renditionFlags for a packed image reference.
 
-    Combines bitmapEncoding (template intent) with isOpaque bit.
+    Only sets bitmapEncoding (template intent). The isOpaque flag (bit 1)
+    is never set, matching the system actool behaviour.
     """
-    flags = img.template_rendering_intent << 2
-    # isOpaque (bit 1): check if all alpha values are 255
-    if img.pixel_data:
-        if car._check_opaque(img.pixel_data, img.pixel_format,
-                             img.width, img.height):
-            flags |= 0x02
-    return flags
+    return img.template_rendering_intent << 2
 

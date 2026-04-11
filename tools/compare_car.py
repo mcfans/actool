@@ -428,6 +428,10 @@ def _celm_desc(celm: dict | None) -> str:
     ver = celm.get("ver", 0)
     if comp == 0:
         return "uncompressed"
+    if comp == 1:
+        return "rle"
+    if comp == 2:
+        return "gzip"
     if comp == 4:
         return "lzfse"
     if comp == 11:

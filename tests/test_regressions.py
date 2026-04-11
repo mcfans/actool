@@ -928,3 +928,156 @@ class TestOversizedImagesInline(unittest.TestCase):
         csi = parse_car_csi_by_name(os.path.join(outdir, "Assets.car"))
         self.assertEqual(csi["A.png"][0]["layout"], 1003,
                          "Fitting image should be packed")
+
+
+class TestGzipCompression(unittest.TestCase):
+    """Inline images must use gzip (comp=2) compression when data is large
+    enough, and uncompressed (comp=0) otherwise.
+
+    Regression: images were stored uncompressed at all deployment targets,
+    producing valid but needlessly large car files.
+    """
+
+    def _compile_and_get_celm(self, image_size, min_deploy="10.9"):
+        """Compile a single image and return its CELM (ver, comp) tuple."""
+        tmpdir = tempfile.mkdtemp(prefix="actool_gz_")
+        try:
+            w, h = image_size
+            img = Image.new("RGBA", (w, h), (100, 50, 25, 128))
+            catalog = _make_catalog_with_image(tmpdir, "Img", img)
+            outdir = os.path.join(tmpdir, "out")
+            compile_catalog(catalog, outdir, "macosx", min_deploy)
+            csi = parse_car_csi_by_name(os.path.join(outdir, "Assets.car"))
+            entry = csi["Img.png"][0]
+            rend = entry["rend"]
+            if len(rend) >= 12:
+                ver = struct.unpack_from('<I', rend, 4)[0]
+                comp = struct.unpack_from('<I', rend, 8)[0]
+                return ver, comp
+            return None, None
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_large_image_uses_gzip(self):
+        """Image with > 256B raw data uses gzip (comp=2)."""
+        ver, comp = self._compile_and_get_celm((32, 32))  # 4096B raw
+        self.assertEqual(comp, 2, "Large image should use gzip")
+        self.assertEqual(ver, 0, "Gzip CELM should use ver=0")
+
+    def test_small_image_uncompressed(self):
+        """Image with <= 256B raw data stays uncompressed (comp=0)."""
+        ver, comp = self._compile_and_get_celm((4, 4))  # 64B raw
+        self.assertEqual(comp, 0, "Small image should be uncompressed")
+
+    def test_gzip_at_all_deploy_targets(self):
+        """Gzip works for 10.9, 10.11, and 11.0 targets."""
+        for deploy in ("10.9", "10.11", "11.0"):
+            ver, comp = self._compile_and_get_celm((32, 32), deploy)
+            # 11.0 may use DMP2 for packed, but inline uses gzip
+            self.assertIn(comp, (2, 11),
+                          f"macOS {deploy}: expected gzip(2) or dmp2(11), "
+                          f"got {comp}")
+
+    def test_gzip_data_is_valid(self):
+        """The gzip payload decompresses to the correct size."""
+        import zlib
+        tmpdir = tempfile.mkdtemp(prefix="actool_gzv_")
+        try:
+            img = Image.new("RGBA", (32, 32), (100, 50, 25, 200))
+            catalog = _make_catalog_with_image(tmpdir, "Img", img)
+            outdir = os.path.join(tmpdir, "out")
+            compile_catalog(catalog, outdir, "macosx", "10.9")
+            csi = parse_car_csi_by_name(os.path.join(outdir, "Assets.car"))
+            entry = csi["Img.png"][0]
+            rend = entry["rend"]
+            comp = struct.unpack_from('<I', rend, 8)[0]
+            payload_len = struct.unpack_from('<I', rend, 12)[0]
+            payload = rend[16:16 + payload_len]
+            self.assertEqual(comp, 2)
+            decompressed = zlib.decompress(payload, 15 + 32)
+            expected = 32 * 4 * 32  # width * bpp * height
+            self.assertEqual(len(decompressed), expected)
+        finally:
+            shutil.rmtree(tmpdir)
+
+    @unittest.skipUnless(has_extract_pixels(), "extract_pixels not built")
+    def test_gzip_pixels_roundtrip(self):
+        """Gzip-compressed image roundtrips through CoreUI correctly."""
+        tmpdir = tempfile.mkdtemp(prefix="actool_gzrt_")
+        try:
+            # Solid colour with semi-transparent alpha
+            img = Image.new("RGBA", (16, 16), (200, 100, 50, 180))
+            catalog = _make_catalog_with_image(tmpdir, "GzImg", img)
+            outdir = os.path.join(tmpdir, "out")
+            compile_catalog(catalog, outdir, "macosx", "10.9")
+            car = os.path.join(outdir, "Assets.car")
+            ext = os.path.join(tmpdir, "ext")
+            os.makedirs(ext)
+            result = extract_car_image(car, "GzImg", ext)
+            self.assertIn(1, result)
+            w, h, pixels = result[1]
+            self.assertEqual((w, h), (16, 16))
+            # Check alpha survived (premultiplied: R = 200*180/255 ≈ 141)
+            a = pixels[3]
+            self.assertEqual(a, 180, f"Alpha should be 180, got {a}")
+            r = pixels[0]
+            self.assertAlmostEqual(r, 141, delta=2,
+                                   msg=f"Premultiplied R ≈ 141, got {r}")
+        finally:
+            shutil.rmtree(tmpdir)
+
+
+class TestOpaqueFlag(unittest.TestCase):
+    """The isOpaque rendition flag must never be set.
+
+    Regression: our tool set is_opaque=True for images with all alpha=255,
+    but the system actool never sets this flag.
+    """
+
+    def test_opaque_flag_not_set_for_rgb(self):
+        """RGB image (fully opaque) does not get is_opaque flag."""
+        tmpdir = tempfile.mkdtemp(prefix="actool_opq_")
+        try:
+            img = Image.new("RGB", (16, 16), (255, 0, 0))
+            catalog = _make_catalog_with_image(tmpdir, "Opaque", img)
+            outdir = os.path.join(tmpdir, "out")
+            compile_catalog(catalog, outdir, "macosx", "11.0")
+            csi = parse_car_csi_by_name(os.path.join(outdir, "Assets.car"))
+            for entry in csi["Opaque.png"]:
+                self.assertFalse(entry["flags"] & 0x02,
+                                 "isOpaque bit should not be set")
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_opaque_flag_not_set_for_transparent(self):
+        """Image with alpha < 255 also does not get is_opaque flag."""
+        tmpdir = tempfile.mkdtemp(prefix="actool_opq_")
+        try:
+            img = Image.new("RGBA", (16, 16), (255, 0, 0, 128))
+            catalog = _make_catalog_with_image(tmpdir, "Semi", img)
+            outdir = os.path.join(tmpdir, "out")
+            compile_catalog(catalog, outdir, "macosx", "11.0")
+            csi = parse_car_csi_by_name(os.path.join(outdir, "Assets.car"))
+            for entry in csi["Semi.png"]:
+                self.assertFalse(entry["flags"] & 0x02,
+                                 "isOpaque bit should not be set")
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_packed_ref_opaque_flag_not_set(self):
+        """Packed image references also don't set is_opaque."""
+        tmpdir = tempfile.mkdtemp(prefix="actool_opq_")
+        try:
+            catalog, _ = make_temp_catalog(
+                [("A", "RGBA"), ("B", "RGBA"), ("C", "RGBA")], tmpdir)
+            outdir = os.path.join(tmpdir, "out")
+            compile_catalog(catalog, outdir, "macosx", "11.0")
+            csi = parse_car_csi_by_name(os.path.join(outdir, "Assets.car"))
+            for name, entries in csi.items():
+                for entry in entries:
+                    if entry["layout"] == 1003:
+                        self.assertFalse(entry["flags"] & 0x02,
+                                         f"{name}: isOpaque should not "
+                                         f"be set on packed refs")
+        finally:
+            shutil.rmtree(tmpdir)
