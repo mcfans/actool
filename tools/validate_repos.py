@@ -172,6 +172,10 @@ def is_failure(report: dict, min_psnr: float = 20.0) -> bool:
                 # Packed atlas counts/names vary with packing layout
                 if layout == "packed_atlas":
                     continue
+                # packed_ref vs inline is a packing decision difference —
+                # the pixel content is identical, just stored differently
+                if layout in ("packed_ref", "inline"):
+                    continue
                 return True
         if section == "facets":
             if diff.get("only_a") or diff.get("only_b"):

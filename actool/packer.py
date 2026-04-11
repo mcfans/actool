@@ -321,12 +321,16 @@ def group_for_packing(renditions) -> tuple[list, list]:
             groups[key] = []
         groups[key].append(rend)
 
-    # Only pack groups with 2+ images
+    # Only pack groups with 2+ distinct imagesets (facets).
+    # Appearance variants of the same imageset share an identifier,
+    # and the system actool requires at least 2 distinct imagesets
+    # before packing into an atlas.
     pack_groups = []
     inline = list(icon_renditions)
 
     for (fmt, scale, _atlas_id), rends in sorted(groups.items()):
-        if len(rends) >= 2:
+        distinct_facets = len({r.identifier for r in rends})
+        if distinct_facets >= 2:
             pack_groups.append((fmt, scale, rends))
         else:
             inline.extend(rends)
