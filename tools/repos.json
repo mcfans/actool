@@ -14,5 +14,9 @@
   {
     "url": "https://github.com/StanfordBDHG/OwnYourData.git",
     "paths": [ "OwnYourData/Resources/Assets.xcassets" ]
+  },
+  {
+    "url": "https://github.com/Shaarav4795/Cheetah.git",
+    "paths": [ "Cheetah/Assets.xcassets" ]
   }
 ]

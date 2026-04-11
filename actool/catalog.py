@@ -223,23 +223,28 @@ class AssetCatalog:
         return renditions, facets
 
     def _parse_directory(self, catalog_path: Path,
-                         renditions: list, facets: dict):
+                         renditions: list, facets: dict,
+                         namespace: str = ""):
         """Parse asset entries in a directory, recursing into groups."""
         for item in sorted(catalog_path.iterdir()):
             if item.suffix == ".imageset":
-                self._parse_imageset(item, renditions, facets)
+                self._parse_imageset(item, renditions, facets,
+                                     namespace=namespace)
 
             elif item.suffix == ".appiconset":
                 self._parse_appiconset(item, renditions, facets)
 
             elif item.suffix == ".iconset":
-                self._parse_iconset(item, renditions, facets)
+                self._parse_iconset(item, renditions, facets,
+                                    namespace=namespace)
 
             elif item.suffix == ".colorset":
-                self._parse_colorset(item, renditions, facets)
+                self._parse_colorset(item, renditions, facets,
+                                     namespace=namespace)
 
             elif item.suffix == ".dataset":
-                self._parse_dataset(item, renditions, facets)
+                self._parse_dataset(item, renditions, facets,
+                                    namespace=namespace)
 
             elif item.suffix == ".spriteatlas":
                 self._parse_spriteatlas(item, renditions, facets)
@@ -249,12 +254,25 @@ class AssetCatalog:
 
             elif item.is_dir() and not item.suffix:
                 # Plain directory = xcassets group — recurse into it
-                self._parse_directory(item, renditions, facets)
+                # Check if the group provides a namespace prefix
+                child_ns = namespace
+                group_json = item / "Contents.json"
+                if group_json.exists():
+                    with open(group_json) as f:
+                        group_contents = json.load(f)
+                    if group_contents.get("properties", {}).get(
+                            "provides-namespace"):
+                        child_ns = f"{namespace}{item.name}/" if namespace \
+                            else f"{item.name}/"
+                self._parse_directory(item, renditions, facets,
+                                      namespace=child_ns)
 
-    def _parse_imageset(self, item: Path, renditions: list, facets: dict):
+    def _parse_imageset(self, item: Path, renditions: list, facets: dict,
+                        namespace: str = ""):
         """Parse a .imageset directory."""
         name = item.stem
-        ident = self._get_identifier(name)
+        facet_name = namespace + name
+        ident = self._get_identifier(facet_name)
 
         contents_path = item / "Contents.json"
         if not contents_path.exists():
@@ -357,7 +375,7 @@ class AssetCatalog:
             )
             renditions.append(rend)
 
-        facets[name] = (car.ELEMENT_UNIVERSAL, car.PART_REGULAR, ident)
+        facets[facet_name] = (car.ELEMENT_UNIVERSAL, car.PART_REGULAR, ident)
 
     def _parse_appiconset(self, item: Path, renditions: list, facets: dict):
         """Parse an .appiconset directory."""
@@ -446,7 +464,8 @@ class AssetCatalog:
 
         facets[name] = (car.ELEMENT_UNIVERSAL, car.PART_ICON, ident)
 
-    def _parse_iconset(self, item: Path, renditions: list, facets: dict):
+    def _parse_iconset(self, item: Path, renditions: list, facets: dict,
+                       namespace: str = ""):
         """Parse an .iconset directory (document type icons).
 
         Unlike .appiconset, .iconset has no Contents.json — icon images
@@ -455,7 +474,8 @@ class AssetCatalog:
         """
         import re
         name = item.stem
-        ident = self._get_identifier(name)
+        facet_name = namespace + name
+        ident = self._get_identifier(facet_name)
 
         icon_renditions = []
         pattern = re.compile(
@@ -516,13 +536,15 @@ class AssetCatalog:
         ms_rend = car.build_multisize_rendition(name, ident, ms_entries)
         renditions.append(ms_rend)
 
-        facets[name] = (car.ELEMENT_UNIVERSAL, car.PART_ICON, ident)
+        facets[facet_name] = (car.ELEMENT_UNIVERSAL, car.PART_ICON, ident)
 
     def _parse_colorset(self, item_path: Path,
-                        renditions: list, facets: dict):
+                        renditions: list, facets: dict,
+                        namespace: str = ""):
         """Parse a .colorset directory."""
         name = item_path.stem
-        ident = self._get_identifier(name)
+        facet_name = namespace + name
+        ident = self._get_identifier(facet_name)
         contents_path = item_path / "Contents.json"
         if not contents_path.exists():
             return
@@ -530,6 +552,7 @@ class AssetCatalog:
         with open(contents_path) as f:
             contents = json.load(f)
 
+        added = False
         for color_entry in contents.get("colors", []):
             color_data = color_entry.get("color", {})
             components = color_data.get("components", {})
@@ -568,14 +591,18 @@ class AssetCatalog:
             )
             rend._csi_override = csi
             renditions.append(rend)
+            added = True
 
-        facets[name] = (car.ELEMENT_UNIVERSAL, car.PART_COLOR, ident)
+        if added:
+            facets[facet_name] = (car.ELEMENT_UNIVERSAL, car.PART_COLOR, ident)
 
     def _parse_dataset(self, item_path: Path,
-                       renditions: list, facets: dict):
+                       renditions: list, facets: dict,
+                       namespace: str = ""):
         """Parse a .dataset directory."""
         name = item_path.stem
-        ident = self._get_identifier(name)
+        facet_name = namespace + name
+        ident = self._get_identifier(facet_name)
         contents_path = item_path / "Contents.json"
         if not contents_path.exists():
             return
@@ -607,7 +634,7 @@ class AssetCatalog:
             rend._csi_override = csi
             renditions.append(rend)
 
-        facets[name] = (car.ELEMENT_UNIVERSAL, car.PART_REGULAR, ident)
+        facets[facet_name] = (car.ELEMENT_UNIVERSAL, car.PART_REGULAR, ident)
 
     def _parse_spriteatlas(self, item_path: Path,
                            renditions: list, facets: dict):

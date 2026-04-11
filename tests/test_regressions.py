@@ -1364,3 +1364,167 @@ class TestPlatformFilterAppIcon(unittest.TestCase):
                              "iOS-only AppIcon should not create inline icons")
         finally:
             shutil.rmtree(tmpdir)
+
+
+def _make_namespaced_catalog(tmpdir, groups):
+    """Create a catalog with namespace-providing groups.
+
+    groups: dict of {group_name: [(imageset_name, color)]}
+    """
+    import json
+    catalog = os.path.join(tmpdir, "Test.xcassets")
+    os.makedirs(catalog)
+    with open(os.path.join(catalog, "Contents.json"), "w") as f:
+        json.dump({"info": {"author": "xcode", "version": 1}}, f)
+
+    for group_name, imagesets in groups.items():
+        group_dir = os.path.join(catalog, group_name)
+        os.makedirs(group_dir)
+        with open(os.path.join(group_dir, "Contents.json"), "w") as f:
+            json.dump({
+                "info": {"author": "xcode", "version": 1},
+                "properties": {"provides-namespace": True},
+            }, f)
+        for img_name, color in imagesets:
+            iset = os.path.join(group_dir, f"{img_name}.imageset")
+            os.makedirs(iset)
+            Image.new("RGBA", (16, 16), color).save(
+                os.path.join(iset, f"{img_name}.png"))
+            Image.new("RGBA", (32, 32), color).save(
+                os.path.join(iset, f"{img_name}@2x.png"))
+            with open(os.path.join(iset, "Contents.json"), "w") as f:
+                json.dump({
+                    "images": [
+                        {"filename": f"{img_name}.png", "idiom": "mac",
+                         "scale": "1x"},
+                        {"filename": f"{img_name}@2x.png", "idiom": "mac",
+                         "scale": "2x"},
+                    ],
+                    "info": {"author": "xcode", "version": 1},
+                }, f)
+    return catalog
+
+
+class TestNamespaceGroups(unittest.TestCase):
+    """Groups with provides-namespace must prefix facet names with the
+    group name.
+
+    Regression: provides-namespace was ignored, so imagesets inside
+    namespaced groups had bare names instead of group/name, causing
+    collisions when different groups had identically-named imagesets.
+    """
+
+    def test_namespace_prefix_in_facets(self):
+        """Facet names include the group prefix."""
+        tmpdir = tempfile.mkdtemp(prefix="actool_ns_")
+        try:
+            catalog = _make_namespaced_catalog(tmpdir, {
+                "animals": [("cat", (255, 0, 0, 255)),
+                            ("dog", (0, 255, 0, 255))],
+            })
+            outdir = os.path.join(tmpdir, "out")
+            compile_catalog(catalog, outdir, "macosx", "11.0")
+            csi = parse_car_csi_by_name(os.path.join(outdir, "Assets.car"))
+            # Facets should NOT have bare names
+            from tests.helpers import _read_car_blocks, _walk_tree_leaves
+            data, blocks, named, read_block = _read_car_blocks(
+                os.path.join(outdir, "Assets.car"))
+            tree = read_block(named["FACETKEYS"])
+            root = struct.unpack('>I', tree[8:12])[0]
+            facet_names = set()
+            for key_bytes, _ in _walk_tree_leaves(read_block, root):
+                facet_names.add(key_bytes.rstrip(b'\x00').decode())
+            self.assertIn("animals/cat", facet_names)
+            self.assertIn("animals/dog", facet_names)
+            self.assertNotIn("cat", facet_names)
+            self.assertNotIn("dog", facet_names)
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_non_namespace_group_no_prefix(self):
+        """Groups without provides-namespace use bare names."""
+        tmpdir = tempfile.mkdtemp(prefix="actool_nons_")
+        try:
+            import json
+            catalog = os.path.join(tmpdir, "Test.xcassets")
+            os.makedirs(catalog)
+            with open(os.path.join(catalog, "Contents.json"), "w") as f:
+                json.dump({"info": {"author": "xcode", "version": 1}}, f)
+            # Group WITHOUT provides-namespace
+            group = os.path.join(catalog, "icons")
+            os.makedirs(group)
+            with open(os.path.join(group, "Contents.json"), "w") as f:
+                json.dump({"info": {"author": "xcode", "version": 1}}, f)
+            iset = os.path.join(group, "star.imageset")
+            os.makedirs(iset)
+            Image.new("RGBA", (16, 16), (255, 255, 0, 255)).save(
+                os.path.join(iset, "star.png"))
+            with open(os.path.join(iset, "Contents.json"), "w") as f:
+                json.dump({
+                    "images": [{"filename": "star.png", "idiom": "mac",
+                                "scale": "1x"}],
+                    "info": {"author": "xcode", "version": 1}}, f)
+
+            outdir = os.path.join(tmpdir, "out")
+            compile_catalog(catalog, outdir, "macosx", "11.0")
+            from tests.helpers import _read_car_blocks, _walk_tree_leaves
+            data, blocks, named, read_block = _read_car_blocks(
+                os.path.join(outdir, "Assets.car"))
+            tree = read_block(named["FACETKEYS"])
+            root = struct.unpack('>I', tree[8:12])[0]
+            facet_names = set()
+            for key_bytes, _ in _walk_tree_leaves(read_block, root):
+                facet_names.add(key_bytes.rstrip(b'\x00').decode())
+            self.assertIn("star", facet_names)
+            self.assertNotIn("icons/star", facet_names)
+        finally:
+            shutil.rmtree(tmpdir)
+
+
+class TestEmptyColorset(unittest.TestCase):
+    """Colorsets with no actual color data must not create a facet.
+
+    Regression: placeholder colorsets (idiom but no color components)
+    created an empty facet, producing a spurious entry in the car file.
+    """
+
+    def test_empty_colorset_no_facet(self):
+        tmpdir = tempfile.mkdtemp(prefix="actool_emptyc_")
+        try:
+            import json
+            catalog = os.path.join(tmpdir, "Test.xcassets")
+            os.makedirs(catalog)
+            with open(os.path.join(catalog, "Contents.json"), "w") as f:
+                json.dump({"info": {"author": "xcode", "version": 1}}, f)
+            cset = os.path.join(catalog, "Placeholder.colorset")
+            os.makedirs(cset)
+            with open(os.path.join(cset, "Contents.json"), "w") as f:
+                json.dump({
+                    "colors": [{"idiom": "universal"}],
+                    "info": {"author": "xcode", "version": 1},
+                }, f)
+            # Also add a real image so the car file is non-empty
+            iset = os.path.join(catalog, "Img.imageset")
+            os.makedirs(iset)
+            Image.new("RGBA", (16, 16), (100, 100, 100, 255)).save(
+                os.path.join(iset, "Img.png"))
+            with open(os.path.join(iset, "Contents.json"), "w") as f:
+                json.dump({
+                    "images": [{"filename": "Img.png", "idiom": "mac",
+                                "scale": "1x"}],
+                    "info": {"author": "xcode", "version": 1}}, f)
+
+            outdir = os.path.join(tmpdir, "out")
+            compile_catalog(catalog, outdir, "macosx", "11.0")
+            from tests.helpers import _read_car_blocks, _walk_tree_leaves
+            data, blocks, named, read_block = _read_car_blocks(
+                os.path.join(outdir, "Assets.car"))
+            tree = read_block(named["FACETKEYS"])
+            root = struct.unpack('>I', tree[8:12])[0]
+            facet_names = set()
+            for key_bytes, _ in _walk_tree_leaves(read_block, root):
+                facet_names.add(key_bytes.rstrip(b'\x00').decode())
+            self.assertNotIn("Placeholder", facet_names,
+                             "Empty colorset should not create a facet")
+        finally:
+            shutil.rmtree(tmpdir)
