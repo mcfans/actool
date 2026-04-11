@@ -1,20 +1,18 @@
 [
   {
     "url": "https://github.com/transmission/transmission.git",
-    "paths": [
-      "macosx/Images/Images.xcassets"
-    ]
+    "paths": [ "macosx/Images/Images.xcassets" ]
   },
   {
     "url": "https://github.com/iina/iina.git",
-    "paths": [
-      "iina/Assets.xcassets"
-    ]
+    "paths": [ "iina/Assets.xcassets" ]
   },
   {
     "url": "https://github.com/rxhanson/Rectangle.git",
-    "paths": [
-      "Rectangle/Assets.xcassets"
-    ]
+    "paths": [ "Rectangle/Assets.xcassets" ]
+  },
+  {
+    "url": "https://github.com/StanfordBDHG/OwnYourData.git",
+    "paths": [ "OwnYourData/Resources/Assets.xcassets" ]
   }
 ]

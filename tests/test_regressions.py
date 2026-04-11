@@ -1186,3 +1186,181 @@ class TestKcbcChunkedLzfse(unittest.TestCase):
                                    msg=f"Premultiplied R ≈ 141, got {r}")
         finally:
             shutil.rmtree(tmpdir)
+
+
+def _make_imageset_with_appearance(parent_dir, name, light_color, dark_color):
+    """Create an imageset with light and dark appearance variants."""
+    import json
+    iset = os.path.join(parent_dir, f"{name}.imageset")
+    os.makedirs(iset, exist_ok=True)
+    Image.new("RGBA", (16, 16), light_color).save(
+        os.path.join(iset, f"{name}.png"))
+    Image.new("RGBA", (16, 16), dark_color).save(
+        os.path.join(iset, f"{name}Dark.png"))
+    with open(os.path.join(iset, "Contents.json"), "w") as f:
+        json.dump({
+            "images": [
+                {"filename": f"{name}.png", "idiom": "universal"},
+                {"filename": f"{name}Dark.png", "idiom": "universal",
+                 "appearances": [
+                     {"appearance": "luminosity", "value": "dark"}
+                 ]},
+            ],
+            "info": {"author": "xcode", "version": 1},
+        }, f)
+
+
+class TestDarkModeImages(unittest.TestCase):
+    """Imagesets with dark-mode appearance variants must produce separate
+    renditions with different appearance key values.
+
+    Regression: dark mode appearances on imagesets were ignored — both
+    light and dark variants got appearance=0, causing key collisions
+    and the dark image being unreachable.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="actool_dkimg_")
+        self.catalog = os.path.join(self.tmpdir, "Test.xcassets")
+        os.makedirs(self.catalog)
+        import json
+        with open(os.path.join(self.catalog, "Contents.json"), "w") as f:
+            json.dump({"info": {"author": "xcode", "version": 1}}, f)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir)
+
+    def test_dark_image_produces_two_renditions(self):
+        """Imageset with light+dark produces renditions with distinct keys."""
+        _make_imageset_with_appearance(
+            self.catalog, "Icon",
+            (255, 0, 0, 255), (0, 0, 255, 255))
+        outdir = os.path.join(self.tmpdir, "out")
+        compile_catalog(self.catalog, outdir, "macosx", "11.0")
+        csi = parse_car_csi_by_name(os.path.join(outdir, "Assets.car"))
+        self.assertIn("Icon.png", csi)
+        self.assertIn("IconDark.png", csi)
+
+    def test_dark_image_appearance_values(self):
+        """Light variant has appearance=0, dark has appearance=1."""
+        _make_imageset_with_appearance(
+            self.catalog, "Btn",
+            (255, 255, 255, 255), (0, 0, 0, 255))
+        outdir = os.path.join(self.tmpdir, "out")
+        compile_catalog(self.catalog, outdir, "macosx", "11.0")
+        csi = parse_car_csi_by_name(os.path.join(outdir, "Assets.car"))
+
+        kf = _parse_keyformat(os.path.join(outdir, "Assets.car"))
+        app_idx = kf.index(7)
+
+        light = csi["Btn.png"][0]
+        dark = csi["BtnDark.png"][0]
+        light_app = struct.unpack_from(
+            f'<{len(light["key"])//2}H', light["key"])[app_idx]
+        dark_app = struct.unpack_from(
+            f'<{len(dark["key"])//2}H', dark["key"])[app_idx]
+        self.assertEqual(light_app, 0, "Light should have appearance=0")
+        self.assertEqual(dark_app, 1, "Dark should have appearance=1")
+
+    def test_dark_images_share_identifier(self):
+        """Light and dark variants share the same identifier."""
+        _make_imageset_with_appearance(
+            self.catalog, "Tab",
+            (200, 200, 200, 255), (50, 50, 50, 255))
+        outdir = os.path.join(self.tmpdir, "out")
+        compile_catalog(self.catalog, outdir, "macosx", "11.0")
+        csi = parse_car_csi_by_name(os.path.join(outdir, "Assets.car"))
+
+        kf = _parse_keyformat(os.path.join(outdir, "Assets.car"))
+        id_idx = kf.index(17)
+
+        light = csi["Tab.png"][0]
+        dark = csi["TabDark.png"][0]
+        light_id = struct.unpack_from(
+            f'<{len(light["key"])//2}H', light["key"])[id_idx]
+        dark_id = struct.unpack_from(
+            f'<{len(dark["key"])//2}H', dark["key"])[id_idx]
+        self.assertEqual(light_id, dark_id)
+
+
+class TestDisplayP3Colorspace(unittest.TestCase):
+    """display-p3 colorsets must use colorspace ID 3 in the COLR block.
+
+    Regression: display-p3 was mapped to colorspace 2 (gray gamma 2.2)
+    instead of 3.
+    """
+
+    def test_display_p3_colorspace_id(self):
+        tmpdir = tempfile.mkdtemp(prefix="actool_p3_")
+        try:
+            import json
+            catalog = os.path.join(tmpdir, "Test.xcassets")
+            os.makedirs(catalog)
+            with open(os.path.join(catalog, "Contents.json"), "w") as f:
+                json.dump({"info": {"author": "xcode", "version": 1}}, f)
+            _make_colorset(catalog, "Accent", [
+                {"r": 0.5, "g": 0.3, "b": 0.8, "a": 1.0},
+            ])
+            # Patch the colorset to use display-p3
+            cset = os.path.join(catalog, "Accent.colorset", "Contents.json")
+            with open(cset) as f:
+                data = json.load(f)
+            data["colors"][0]["color"]["color-space"] = "display-p3"
+            with open(cset, "w") as f:
+                json.dump(data, f)
+
+            outdir = os.path.join(tmpdir, "out")
+            compile_catalog(catalog, outdir, "macosx", "11.0")
+            csi = parse_car_csi_by_name(os.path.join(outdir, "Assets.car"))
+            entry = csi["Accent"][0]
+            from tests.helpers import parse_colr_rendition
+            colr = parse_colr_rendition(entry["rend"])
+            self.assertEqual(colr["colorspace"], 3,
+                             "display-p3 should map to colorspace 3")
+        finally:
+            shutil.rmtree(tmpdir)
+
+
+class TestPlatformFilterAppIcon(unittest.TestCase):
+    """AppIcon images with a platform filter must be skipped when the
+    platform doesn't match.
+
+    Regression: appiconset entries with "platform": "ios" were included
+    in macOS builds, producing spurious AppIcon renditions.
+    """
+
+    def test_ios_only_icon_excluded_on_macos(self):
+        tmpdir = tempfile.mkdtemp(prefix="actool_plat_")
+        try:
+            import json
+            catalog = os.path.join(tmpdir, "Test.xcassets")
+            os.makedirs(catalog)
+            with open(os.path.join(catalog, "Contents.json"), "w") as f:
+                json.dump({"info": {"author": "xcode", "version": 1}}, f)
+
+            iset = os.path.join(catalog, "AppIcon.appiconset")
+            os.makedirs(iset)
+            Image.new("RGBA", (1024, 1024), (100, 50, 25, 255)).save(
+                os.path.join(iset, "AppIcon.png"))
+            with open(os.path.join(iset, "Contents.json"), "w") as f:
+                json.dump({
+                    "images": [
+                        {"filename": "AppIcon.png", "idiom": "universal",
+                         "platform": "ios", "size": "1024x1024"},
+                    ],
+                    "info": {"author": "xcode", "version": 1},
+                }, f)
+
+            outdir = os.path.join(tmpdir, "out")
+            compile_catalog(catalog, outdir, "macosx", "11.0",
+                            app_icon="AppIcon",
+                            info_plist_path=os.path.join(outdir, "I.plist"))
+
+            info = parse_car_info(os.path.join(outdir, "Assets.car"))
+            lc = info["layout_counts"]
+            self.assertEqual(lc.get(1010, 0), 0,
+                             "iOS-only AppIcon should not create multisize")
+            self.assertEqual(lc.get(12, 0), 0,
+                             "iOS-only AppIcon should not create inline icons")
+        finally:
+            shutil.rmtree(tmpdir)

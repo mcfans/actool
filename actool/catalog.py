@@ -308,6 +308,13 @@ class AssetCatalog:
             }
             direction = direction_map.get(lang_dir_str, car.DIRECTION_DEFAULT)
 
+            # Appearance variant (dark mode)
+            appearance = 0
+            for app in img_info.get("appearances", []):
+                if (app.get("appearance") == "luminosity"
+                        and app.get("value") == "dark"):
+                    appearance = 1
+
             # PDF files are stored as raw data (layout 9), not rasterized
             if filename.lower().endswith(".pdf"):
                 with open(img_path, "rb") as pdf_f:
@@ -319,6 +326,7 @@ class AssetCatalog:
                     element=car.ELEMENT_UNIVERSAL,
                     part=car.PART_REGULAR,
                     scale=1,
+                    appearance=appearance,
                     direction=direction,
                     layout=car.LAYOUT_PDF,
                     pixel_format=car.PIXELFMT_PDF,
@@ -340,6 +348,7 @@ class AssetCatalog:
                 height=height,
                 pixel_data=pixel_data,
                 pixel_format=pixel_format,
+                appearance=appearance,
                 direction=direction,
                 layout=car.LAYOUT_ONE_PART_SCALE,
                 template_rendering_intent=template_intent,
@@ -378,6 +387,11 @@ class AssetCatalog:
             if not img_path.exists():
                 continue
 
+            # Skip images targeted at other platforms
+            img_platform = img_info.get("platform", "")
+            if img_platform and img_platform != self.platform:
+                continue
+
             scale_str = img_info.get("scale", "1x")
             scale = int(scale_str.replace("x", ""))
 
@@ -410,6 +424,9 @@ class AssetCatalog:
             )
             renditions.append(rend)
             icon_renditions.append((rend, point_w, pixel_size))
+
+        if not icon_renditions:
+            return
 
         # Add multisize image rendition (one entry per point size)
         ms_entries = []
@@ -525,8 +542,8 @@ class AssetCatalog:
             a = _parse_color_component(components.get("alpha", "1"))
 
             colorspace = color_data.get("color-space", "srgb")
-            cs_map = {"srgb": 1, "display-p3": 2, "extended-srgb": 4,
-                      "extended-linear-srgb": 7, "gray-gamma-22": 1}
+            cs_map = {"srgb": 1, "display-p3": 3, "extended-srgb": 4,
+                      "extended-linear-srgb": 7, "gray-gamma-22": 2}
             cs_id = cs_map.get(colorspace, 1)
 
             # Check for appearance variants (dark mode)
