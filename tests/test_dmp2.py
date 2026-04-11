@@ -1,13 +1,13 @@
-"""Tests for DMP2 (Deepmap2) compression integration.
+"""Tests for deepmap2 (comp=11) compression integration.
 
 Validates:
-1. DMP2 is used for packed atlases when deployment target >= macOS 11.0
-2. DMP2 is NOT used for standalone images (layout 12) — LZFSE is used instead
-3. DMP2 is NOT used for deployment targets below macOS 11.0
-4. CELM envelope format for DMP2 blocks (ver=2, comp=11, sub-header)
-5. DMP2 payload starts with "dmp2" magic and has valid header fields
-6. CoreUI can decode DMP2-compressed renditions
-7. Fallback to LZFSE when DMP2 is unavailable
+1. deepmap2 is used for packed atlases when deployment target >= macOS 11.0
+2. deepmap2 is also used for inline BGRA images at >= macOS 11.0
+3. deepmap2 is NOT used for deployment targets below macOS 11.0
+4. CELM envelope format for deepmap2 blocks (sub-header with pixfmt)
+5. deepmap2 payload starts with "dmp2" magic and has valid header fields
+6. CoreUI can decode deepmap2-compressed renditions
+7. Fallback to lzfse/zip when deepmap2 is unavailable
 """
 
 import os
@@ -296,8 +296,8 @@ class TestCarDmp2Layout(unittest.TestCase):
 
     @unittest.skipUnless(deepmap2.is_available(),
                          "vImage deepmap2 encoder not available")
-    def test_standalone_bgra_use_lzfse_at_11_0(self):
-        """BGRA standalone (layout 12) renditions use LZFSE, not DMP2."""
+    def test_standalone_bgra_use_dmp2_at_11_0(self):
+        """BGRA standalone (layout 12) renditions use DMP2 at 11.0."""
         entries = self._compile_and_parse("11.0")
         standalone_bgra = [e for e in entries
                            if e['layout'] == LAYOUT_ONE_PART_SCALE
@@ -306,9 +306,9 @@ class TestCarDmp2Layout(unittest.TestCase):
         self.assertGreater(len(standalone_bgra), 0,
                            "No standalone BGRA renditions found")
         for e in standalone_bgra:
-            self.assertNotEqual(e['celm_comp'], 11,
-                                f"{e['name']}: standalone BGRA should not use "
-                                f"DMP2, got comp={e['celm_comp']}")
+            self.assertEqual(e['celm_comp'], 11,
+                             f"{e['name']}: standalone BGRA should use DMP2 "
+                             f"at 11.0, got comp={e['celm_comp']}")
 
     def test_no_dmp2_at_10_15(self):
         """No renditions use DMP2 when target is 10.15."""

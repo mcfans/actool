@@ -183,9 +183,53 @@ def _parse_version(ver_str: str) -> tuple:
 _MIN_LZFSE_VERSION = {"macosx": (10, 11), "iphoneos": (9, 0),
                        "appletvos": (9, 0), "watchos": (2, 0)}
 
-# Deepmap2 (DMP2) is used by the system actool for macOS >= 11.0.
+# deepmap2 (comp=11) is used by the system actool for macOS >= 11.0.
 _MIN_DMP2_VERSION = {"macosx": (11, 0), "iphoneos": (14, 0),
                       "appletvos": (14, 0), "watchos": (7, 0)}
+
+
+def _compress_kcbc(pixel_data: bytes, height: int) -> bytes | None:
+    """Compress pixel data using KCBC-chunked LZFSE.
+
+    The data is split into 3 equal row-groups (plus a remainder), each
+    independently LZFSE-compressed.  Returns the concatenated chunk data
+    (without the CELM header or KCBC marker prefix — caller adds those),
+    or None if LZFSE is unavailable.
+
+    Chunk layout (non-final):  [header 16B] [lzfse data with bvx$] [KCBC 4B]
+    Final chunk:               [header 16B] [lzfse data with bvx$]
+
+    Header: zero(4) + zero(4) + num_rows(4) + compressed_size(4)
+    compressed_size includes the bvx$ terminator emitted by liblzfse.
+    """
+    if not HAS_LZFSE:
+        return None
+
+    bpr = len(pixel_data) // height if height > 0 else 0
+    if bpr == 0:
+        return None
+
+    # Split into 3 chunks of rows_per_chunk rows + a remainder chunk
+    rows_per_chunk = height // 3 if height >= 3 else height
+    chunks_out = bytearray()
+    row = 0
+
+    while row < height:
+        n = min(rows_per_chunk, height - row)
+        chunk_data = pixel_data[row * bpr:(row + n) * bpr]
+        # liblzfse.compress() returns bvx2 blocks terminated by bvx$
+        compressed = lzfse.compress(chunk_data)
+
+        # Chunk header: zero, zero, num_rows, compressed_size
+        chunks_out += struct.pack("<IIII", 0, 0, n, len(compressed))
+        chunks_out += compressed
+
+        row += n
+        # KCBC boundary marker between chunks (not after the last one)
+        if row < height:
+            chunks_out += b"KCBC"
+
+    return bytes(chunks_out)
 
 
 def compress_data(pixel_data: bytes, pixel_format: bytes,
@@ -197,11 +241,10 @@ def compress_data(pixel_data: bytes, pixel_format: bytes,
     """Compress pixel data and return the rendition payload (CELM block).
 
     Compression selection:
-    - macOS >= 11.0 with allow_dmp2: DMP2 via vImage
-      - dmp2_inline=True: CELM ver=0, raw DMP2 (for inline images)
-      - dmp2_inline=False: CELM ver=0 with sub-header (for packed atlases)
-    - All targets: gzip (CELM ver=0, comp=2) for data > 256 bytes
-    - Fallback: uncompressed (CELM ver=0, comp=0)
+    - macOS >= 11.0 with allow_dmp2: deepmap2 (comp=11) via vImage
+    - macOS >= 10.11 with liblzfse: KCBC-chunked lzfse (comp=4)
+    - Older / fallback: zip (comp=2, gzip format) for data > 256 bytes
+    - Small data: uncompressed (comp=0)
     """
     from . import deepmap2
 
@@ -216,11 +259,22 @@ def compress_data(pixel_data: bytes, pixel_format: bytes,
                 return deepmap2.make_celm_dmp2(dmp2_data, pixel_format,
                                                inline=dmp2_inline)
 
-    # Gzip compression (CELM ver=0, comp=2).
-    # The system actool uses gzip for pre-LZFSE targets (macOS < 10.11)
-    # and KCBC-chunked LZFSE for >= 10.11.  We use gzip for both since
-    # we don't implement the KCBC chunked container, and CoreUI decodes
-    # gzip at all deployment targets.
+    # KCBC-chunked LZFSE (CELM ver=1, comp=4) for targets >= 10.11.
+    # The pixel data is split into 3 equal chunks (plus a remainder
+    # chunk).  Each chunk is independently LZFSE-compressed and wrapped
+    # with a 16-byte header, a bvx$ end marker, and a KCBC boundary
+    # marker.
+    lzfse_min = _MIN_LZFSE_VERSION.get(platform, (10, 11))
+    if HAS_LZFSE and deploy_ver >= lzfse_min and len(pixel_data) > 256:
+        kcbc = _compress_kcbc(pixel_data, height)
+        if kcbc is not None:
+            # CELM header claims payload=3 but the KCBC marker is 4 bytes.
+            # CoreUI reads 4 bytes regardless of the payload field.
+            celm = struct.pack("<4sIII", b"MLEC", 1, 4, 3)
+            return celm + b"KCBC" + kcbc
+
+    # zip compression (CELM ver=0, comp=2, gzip format) for older
+    # targets or when liblzfse is unavailable.
     if len(pixel_data) > 256:
         import zlib
         gz = zlib.compress(pixel_data, wbits=15 + 16)  # gzip format
@@ -590,22 +644,45 @@ class Rendition:
             tlv += make_blend_opacity_tlv()
             tlv += make_exif_orientation_tlv()
             if self.pixel_data:
+                # KCBC-chunked LZFSE requires 32-byte aligned row stride;
+                # gzip/uncompressed use exact width*bpp stride.
+                deploy_ver = _parse_version(self.min_deploy)
+                lzfse_min = _MIN_LZFSE_VERSION.get(self.platform, (10, 11))
+                use_aligned = HAS_LZFSE and deploy_ver >= lzfse_min
                 tlv += make_bytes_per_row_tlv(self.width, self.pixel_format,
-                                              aligned=False)
+                                              aligned=use_aligned)
 
-        # Inline images use exact width*bpp stride (no padding).
-        # Pixel data is passed directly to the compressor.
+        # Build rendition data — pad rows when using aligned stride.
         rend_data = b""
         if self.pixel_data:
             pixel_data = self.pixel_data
-            # GA8 inline images use DMP2 ver=0; BGRA inline uses LZFSE
-            use_dmp2 = self.pixel_format == b" 8AG"
+            deploy_ver = _parse_version(self.min_deploy)
+            lzfse_min = _MIN_LZFSE_VERSION.get(self.platform, (10, 11))
+            use_aligned = HAS_LZFSE and deploy_ver >= lzfse_min
+            if use_aligned:
+                actual_bpp = 4 if self.pixel_format == b"BGRA" else 2
+                exact_bpr = self.width * actual_bpp
+                aligned_bpr = aligned_bytes_per_row(self.width,
+                                                     self.pixel_format)
+                if aligned_bpr != exact_bpr and self.height > 0:
+                    padded = bytearray()
+                    pad = aligned_bpr - exact_bpr
+                    for row in range(self.height):
+                        start = row * exact_bpr
+                        padded.extend(pixel_data[start:start + exact_bpr])
+                        padded.extend(b'\x00' * pad)
+                    pixel_data = bytes(padded)
+            # Both GA8 and BGRA inline images are eligible for DMP2.
+            # GA8 uses inline format (CELM ver=0, raw DMP2);
+            # BGRA uses the sub-header format (matching system actool).
+            use_dmp2 = True
+            dmp2_is_inline = self.pixel_format == b" 8AG"
             rend_data = compress_data(pixel_data, self.pixel_format,
                                       self.width, self.height,
                                       min_deploy=self.min_deploy,
                                       platform=self.platform,
                                       allow_dmp2=use_dmp2,
-                                      dmp2_inline=True)
+                                      dmp2_inline=dmp2_is_inline)
 
         # Template rendering intent → bitmapEncoding field (bits 2-5):
         #   0 (0x00) = original,  4 (0x10) = automatic,  2 (0x08) = template

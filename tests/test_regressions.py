@@ -117,7 +117,8 @@ class TestPremultipliedAlpha(unittest.TestCase):
         """
         tmpdir = tempfile.mkdtemp(prefix="actool_pma_")
         try:
-            img = Image.new("RGBA", (16, 16), (255, 0, 0, 10))
+            # Use alpha=180 (not too low, survives DMP2 lossy compression)
+            img = Image.new("RGBA", (16, 16), (200, 0, 0, 180))
             catalog = _make_catalog_with_image(tmpdir, "SemiRed", img)
             outdir = os.path.join(tmpdir, "out")
             compile_catalog(catalog, outdir, "macosx", "11.0")
@@ -130,9 +131,11 @@ class TestPremultipliedAlpha(unittest.TestCase):
             w, h, pixels = result[1]
             # RGBA from extract_pixels (premultiplied last)
             r, g, b, a = pixels[0], pixels[1], pixels[2], pixels[3]
-            self.assertEqual(a, 10, f"alpha should be 10, got {a}")
-            self.assertAlmostEqual(r, 10, delta=2,
-                                   msg=f"premultiplied R should be ~10, got {r}")
+            # Premultiplied: R = 200*180/255 ≈ 141, A = 180
+            self.assertAlmostEqual(a, 180, delta=5,
+                                   msg=f"alpha should be ~180, got {a}")
+            self.assertAlmostEqual(r, 141, delta=10,
+                                   msg=f"premultiplied R should be ~141, got {r}")
         finally:
             shutil.rmtree(tmpdir)
 
@@ -930,9 +933,9 @@ class TestOversizedImagesInline(unittest.TestCase):
                          "Fitting image should be packed")
 
 
-class TestGzipCompression(unittest.TestCase):
-    """Inline images must use gzip (comp=2) compression when data is large
-    enough, and uncompressed (comp=0) otherwise.
+class TestZipCompression(unittest.TestCase):
+    """Inline images must use zip (comp=2, gzip format) compression when
+    data is large enough, and uncompressed (comp=0) otherwise.
 
     Regression: images were stored uncompressed at all deployment targets,
     producing valid but needlessly large car files.
@@ -958,28 +961,32 @@ class TestGzipCompression(unittest.TestCase):
         finally:
             shutil.rmtree(tmpdir)
 
-    def test_large_image_uses_gzip(self):
-        """Image with > 256B raw data uses gzip (comp=2)."""
+    def test_large_image_uses_zip(self):
+        """Image with > 256B raw data uses zip (comp=2)."""
         ver, comp = self._compile_and_get_celm((32, 32))  # 4096B raw
-        self.assertEqual(comp, 2, "Large image should use gzip")
-        self.assertEqual(ver, 0, "Gzip CELM should use ver=0")
+        self.assertEqual(comp, 2, "Large image should use zip")
+        self.assertEqual(ver, 0, "zip CELM should use ver=0")
 
     def test_small_image_uncompressed(self):
         """Image with <= 256B raw data stays uncompressed (comp=0)."""
         ver, comp = self._compile_and_get_celm((4, 4))  # 64B raw
         self.assertEqual(comp, 0, "Small image should be uncompressed")
 
-    def test_gzip_at_all_deploy_targets(self):
-        """Gzip works for 10.9, 10.11, and 11.0 targets."""
-        for deploy in ("10.9", "10.11", "11.0"):
+    def test_compression_per_deploy_target(self):
+        """Each deploy target uses the appropriate compression."""
+        expected = {
+            "10.9": 2,   # zip (pre-lzfse)
+            "10.11": 4,  # KCBC-chunked lzfse
+            "11.0": 11,  # deepmap2 for inline BGRA at >= 11.0
+        }
+        for deploy, exp_comp in expected.items():
             ver, comp = self._compile_and_get_celm((32, 32), deploy)
-            # 11.0 may use DMP2 for packed, but inline uses gzip
-            self.assertIn(comp, (2, 11),
-                          f"macOS {deploy}: expected gzip(2) or dmp2(11), "
-                          f"got {comp}")
+            self.assertEqual(comp, exp_comp,
+                             f"macOS {deploy}: expected comp={exp_comp}, "
+                             f"got {comp}")
 
-    def test_gzip_data_is_valid(self):
-        """The gzip payload decompresses to the correct size."""
+    def test_zip_data_is_valid(self):
+        """The zip (gzip) payload decompresses to the correct size."""
         import zlib
         tmpdir = tempfile.mkdtemp(prefix="actool_gzv_")
         try:
@@ -1001,8 +1008,8 @@ class TestGzipCompression(unittest.TestCase):
             shutil.rmtree(tmpdir)
 
     @unittest.skipUnless(has_extract_pixels(), "extract_pixels not built")
-    def test_gzip_pixels_roundtrip(self):
-        """Gzip-compressed image roundtrips through CoreUI correctly."""
+    def test_zip_pixels_roundtrip(self):
+        """zip-compressed image roundtrips through CoreUI correctly."""
         tmpdir = tempfile.mkdtemp(prefix="actool_gzrt_")
         try:
             # Solid colour with semi-transparent alpha
@@ -1079,5 +1086,103 @@ class TestOpaqueFlag(unittest.TestCase):
                         self.assertFalse(entry["flags"] & 0x02,
                                          f"{name}: isOpaque should not "
                                          f"be set on packed refs")
+        finally:
+            shutil.rmtree(tmpdir)
+
+
+class TestKcbcChunkedLzfse(unittest.TestCase):
+    """KCBC-chunked LZFSE compression for macOS >= 10.11.
+
+    Regression: LZFSE data was written as raw bvx2 blocks in CELM ver=2,
+    which caused CoreUI to lose the alpha channel. The system actool uses
+    CELM ver=1 with KCBC chunking — data split into 3 row-groups, each
+    independently LZFSE-compressed with KCBC boundary markers.
+    """
+
+    def _compile_and_get_celm(self, width, height, deploy="10.11"):
+        """Compile a single inline image and return (celm_ver, celm_comp,
+        celm_datalen, rend_data_bytes)."""
+        tmpdir = tempfile.mkdtemp(prefix="actool_kcbc_")
+        try:
+            img = Image.new("RGBA", (width, height), (100, 50, 25, 180))
+            catalog = _make_catalog_with_image(tmpdir, "Img", img)
+            outdir = os.path.join(tmpdir, "out")
+            compile_catalog(catalog, outdir, "macosx", deploy)
+            csi = parse_car_csi_by_name(os.path.join(outdir, "Assets.car"))
+            entry = csi["Img.png"][0]
+            rend = entry["rend"]
+            ver = struct.unpack_from('<I', rend, 4)[0]
+            comp = struct.unpack_from('<I', rend, 8)[0]
+            datalen = struct.unpack_from('<I', rend, 12)[0]
+            return ver, comp, datalen, rend
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_1011_uses_kcbc(self):
+        """macOS 10.11 inline images use KCBC (CELM ver=1 comp=4)."""
+        ver, comp, _, _ = self._compile_and_get_celm(64, 64)
+        self.assertEqual(ver, 1, "KCBC should use CELM ver=1")
+        self.assertEqual(comp, 4, "KCBC should use comp=4")
+
+    def test_celm_payload_is_3(self):
+        """CELM payload length must be 3 (for the KCB prefix)."""
+        _, _, datalen, _ = self._compile_and_get_celm(64, 64)
+        self.assertEqual(datalen, 3)
+
+    def test_kcbc_marker_follows_celm(self):
+        """KCBC (4 bytes) must immediately follow the 16-byte CELM header."""
+        _, _, _, rend = self._compile_and_get_celm(64, 64)
+        self.assertEqual(rend[16:20], b"KCBC")
+
+    def test_chunks_contain_lzfse_data(self):
+        """Each chunk starts with a 16B header then bvx2 LZFSE blocks."""
+        _, _, _, rend = self._compile_and_get_celm(64, 64)
+        # Chunk data starts at offset 20 (CELM 16B + KCBC 4B)
+        chunk_data = rend[20:]
+        # First chunk header
+        z1, z2, nrows, csz = struct.unpack_from('<IIII', chunk_data, 0)
+        self.assertEqual(z1, 0)
+        self.assertEqual(z2, 0)
+        self.assertGreater(nrows, 0)
+        self.assertGreater(csz, 0)
+        # LZFSE data after header should start with bvx2 or bvxn
+        lzfse_start = chunk_data[16:20]
+        self.assertIn(lzfse_start, (b'bvx2', b'bvxn'),
+                      f"Expected bvx2/bvxn, got {lzfse_start!r}")
+
+    def test_no_trailing_kcbc_after_last_chunk(self):
+        """The last chunk must NOT have a trailing KCBC marker."""
+        _, _, _, rend = self._compile_and_get_celm(64, 64)
+        # The data must end with bvx$ (LZFSE end-of-stream), not KCBC
+        self.assertEqual(rend[-4:], b'bvx$',
+                         f"Last 4 bytes should be bvx$, got {rend[-4:]!r}")
+
+    def test_pre_1011_does_not_use_kcbc(self):
+        """macOS 10.9 must not use KCBC (no LZFSE support)."""
+        ver, comp, _, _ = self._compile_and_get_celm(64, 64, deploy="10.9")
+        self.assertNotEqual(comp, 4, "Pre-10.11 should not use KCBC")
+
+    @unittest.skipUnless(has_extract_pixels(), "extract_pixels not built")
+    def test_kcbc_pixels_roundtrip(self):
+        """KCBC-compressed image roundtrips through CoreUI correctly."""
+        tmpdir = tempfile.mkdtemp(prefix="actool_kcbc_rt_")
+        try:
+            img = Image.new("RGBA", (64, 64), (200, 100, 50, 180))
+            catalog = _make_catalog_with_image(tmpdir, "KcImg", img)
+            outdir = os.path.join(tmpdir, "out")
+            compile_catalog(catalog, outdir, "macosx", "10.11")
+            car = os.path.join(outdir, "Assets.car")
+            ext = os.path.join(tmpdir, "ext")
+            os.makedirs(ext)
+            result = extract_car_image(car, "KcImg", ext)
+            self.assertIn(1, result)
+            w, h, pixels = result[1]
+            self.assertEqual((w, h), (64, 64))
+            # Premultiplied: R = 200*180/255 ≈ 141, A = 180
+            a = pixels[3]
+            self.assertEqual(a, 180, f"Alpha should be 180, got {a}")
+            r = pixels[0]
+            self.assertAlmostEqual(r, 141, delta=2,
+                                   msg=f"Premultiplied R ≈ 141, got {r}")
         finally:
             shutil.rmtree(tmpdir)

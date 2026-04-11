@@ -385,28 +385,28 @@ class TestCelmFormat(unittest.TestCase):
     def tearDownClass(cls):
         shutil.rmtree(cls.tmpdir)
 
-    def test_celm_no_ver1_lzfse(self):
-        """CELM ver=1 must NOT use comp=4 (LZFSE).
+    def test_celm_ver1_lzfse_has_kcbc(self):
+        """CELM ver=1 comp=4 must use KCBC chunking.
 
-        Regression: plain LZFSE in CELM ver=1 crashes CoreUI with
-        'Can't find the correct chunk'. LZFSE requires CELM ver=2.
+        Raw LZFSE in CELM ver=1 (without KCBC chunking) crashes CoreUI.
+        The CELM payload length must be 3 (for the KCB prefix of KCBC).
         """
         entries = _parse_celm_entries(self.car_path)
         self.assertGreater(len(entries), 0)
         for e in entries:
-            if e['celm_ver'] == 1:
-                self.assertNotEqual(e['celm_comp'], 4,
-                                    f"{e['name']}: CELM ver=1 comp=4 (LZFSE) "
-                                    f"is not supported by CoreUI")
+            if e['celm_ver'] == 1 and e['celm_comp'] == 4:
+                self.assertEqual(e['celm_datalen'], 3,
+                                 f"{e['name']}: KCBC LZFSE must have "
+                                 f"celm_payload=3")
 
-    def test_celm_lzfse_uses_ver2(self):
-        """When LZFSE is used, it must be CELM ver=2."""
+    def test_celm_lzfse_uses_kcbc(self):
+        """When LZFSE is used, it must be CELM ver=1 (KCBC chunked)."""
         entries = _parse_celm_entries(self.car_path)
         for e in entries:
             if e['celm_comp'] == 4:
-                self.assertEqual(e['celm_ver'], 2,
-                                 f"{e['name']}: LZFSE comp=4 requires ver=2, "
-                                 f"got ver={e['celm_ver']}")
+                self.assertEqual(e['celm_ver'], 1,
+                                 f"{e['name']}: LZFSE comp=4 requires ver=1 "
+                                 f"(KCBC), got ver={e['celm_ver']}")
 
     def test_celm_no_lzfse_for_pre_10_11(self):
         """LZFSE must not be used when targeting macOS < 10.11.
@@ -603,25 +603,22 @@ class TestCoreUIRenderingLegacyTarget(unittest.TestCase):
             self.tmpdir)
         self._assert_renders_match("10.11", catalog, label="10_11_mixed")
 
-    def test_celm_no_unsupported_compression(self):
-        """CELM blocks must not use compression types CoreUI can't handle.
+    def test_celm_ver1_comp4_uses_kcbc(self):
+        """CELM ver=1 comp=4 entries must use KCBC chunking (payload=3).
 
-        Regression: comp=4 (plain LZFSE) in CELM ver=1 crashes CoreUI.
-        Supported: comp=0 (uncompressed), or Apple's ver=2/3 proprietary
-        formats (comp=1 RLE, comp=3 LZVN, comp=4 LZFSE, comp=11 DMP2).
+        Raw LZFSE in CELM ver=1 without KCBC crashes CoreUI.
         """
-        for min_deploy in ("10.10", "10.11", "11.0"):
+        for min_deploy in ("10.11", "11.0"):
             outdir = os.path.join(self.tmpdir, f"celm_{min_deploy}")
             compile_catalog(REF_XCASSETS, outdir, "macosx", min_deploy,
                             app_icon="AppIcon",
                             info_plist_path=os.path.join(outdir, "Info.plist"))
             entries = _parse_celm_entries(os.path.join(outdir, "Assets.car"))
-            unsupported_ver1_comps = {4}  # LZFSE in ver=1 is broken
             for e in entries:
-                if e['celm_ver'] == 1 and e['celm_comp'] in unsupported_ver1_comps:
-                    self.fail(
-                        f"{e['name']} (target {min_deploy}): "
-                        f"CELM ver=1 comp={e['celm_comp']} crashes CoreUI")
+                if e['celm_ver'] == 1 and e['celm_comp'] == 4:
+                    self.assertEqual(e['celm_datalen'], 3,
+                                     f"{e['name']} (target {min_deploy}): "
+                                     f"KCBC requires celm_payload=3")
 
 
 @unittest.skipUnless(has_extract_pixels(), "extract_pixels tool not built")

@@ -420,24 +420,32 @@ def _pixel_format_str(pf: bytes) -> str:
     return repr(pf)
 
 
+_COMP_NAMES = {
+    0: "uncompressed",
+    1: "rle",
+    2: "zip",
+    3: "lzvn",
+    4: "lzfse",
+    5: "jpeg-lzfse",
+    6: "blurred",
+    7: "astc",
+    8: "palette-img",
+    9: "hevc",
+    10: "deepmap-lzfse",
+    11: "deepmap2",
+    12: "dxtc",
+}
+
+
 def _celm_desc(celm: dict | None) -> str:
     """Short description of compression."""
     if celm is None:
         return "none"
     comp = celm.get("comp", 0)
     ver = celm.get("ver", 0)
-    if comp == 0:
-        return "uncompressed"
-    if comp == 1:
-        return "rle"
-    if comp == 2:
-        return "gzip"
-    if comp == 4:
-        return "lzfse"
-    if comp == 11:
-        if celm.get("dmp2_inline"):
-            return "dmp2-inline"
-        return "dmp2"
+    name = _COMP_NAMES.get(comp)
+    if name:
+        return name
     return f"comp={comp}/ver={ver}"
 
 
