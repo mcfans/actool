@@ -340,21 +340,22 @@ def compress_data(pixel_data: bytes, pixel_format: bytes,
             celm = struct.pack("<4sIII", b"MLEC", 1, 4, 3)
             return celm + b"KCBC" + kcbc
 
-    # RLE (comp=1) for images with raw size in (1024, 4096) bytes,
-    # zip (comp=2) for larger images.  The system actool leaves very
-    # small images (≤ 1024B) uncompressed and uses zip above ~4KB.
-    if len(pixel_data) > 1024 and height > 0:
-        if len(pixel_data) < 4096:
-            bpp = 4 if pixel_format == b"BGRA" else 2
-            rle = _compress_rle(pixel_data, width, height, bpp)
-            if len(rle) < len(pixel_data):
-                celm = struct.pack("<4sIII", b"MLEC", 0, 1, len(rle))
-                return celm + rle
+    # The system actool uses:
+    # - zip (comp=2) for raw >= 4096 bytes
+    # - RLE (comp=1) for raw < 4096 bytes when RLE compresses
+    # - uncompressed (comp=0) otherwise
+    if len(pixel_data) >= 4096:
         import zlib
         gz = zlib.compress(pixel_data, wbits=15 + 16)  # gzip format
         if len(gz) < len(pixel_data):
             celm = struct.pack("<4sIII", b"MLEC", 0, 2, len(gz))
             return celm + gz
+    elif height > 0:
+        bpp = 4 if pixel_format == b"BGRA" else 2
+        rle = _compress_rle(pixel_data, width, height, bpp)
+        if len(rle) < len(pixel_data):
+            celm = struct.pack("<4sIII", b"MLEC", 0, 1, len(rle))
+            return celm + rle
 
     # Uncompressed fallback
     celm = struct.pack("<4sIII", b"MLEC", 0, 0, len(pixel_data))
@@ -549,10 +550,12 @@ def build_packed_asset_csi(name: str, width: int, height: int,
     tlv += make_blend_opacity_tlv()
     tlv += make_exif_orientation_tlv()
 
-    # Compress the atlas pixel data (deepmap2 eligible for packed atlases).
+    # Compress the atlas pixel data.
+    # Only GA8 packed atlases use deepmap2; BGRA atlases use KCBC LZFSE.
+    use_dmp2 = pixel_format == b" 8AG"
     rend_data = compress_data(pixel_data, pixel_format, width, height,
                               min_deploy=min_deploy, platform=platform,
-                              allow_dmp2=True)
+                              allow_dmp2=use_dmp2)
     # The BytesPerRow TLV must match the actual data stride.
     # deepmap2 uses 4bpp-aligned stride; lzfse/zip use the atlas's
     # native-bpp stride.  Detect which compressor was used.
@@ -755,17 +758,20 @@ class Rendition:
                         padded.extend(pixel_data[start:start + exact_bpr])
                         padded.extend(b'\x00' * pad)
                     pixel_data = bytes(padded)
-            # Both GA8 and BGRA inline images are eligible for DMP2.
-            # GA8 uses inline format (CELM ver=0, raw DMP2);
-            # BGRA uses the sub-header format (matching system actool).
-            use_dmp2 = True
-            dmp2_is_inline = self.pixel_format == b" 8AG"
+            # deepmap2 is used for:
+            #   - GA8 inline images (inline DMP2 format)
+            #   - Non-icon BGRA inline images (sub-header DMP2 format)
+            # Icon BGRA images use KCBC LZFSE instead.
+            use_dmp2 = (self.pixel_format == b" 8AG" or
+                        (self.pixel_format == b"BGRA" and
+                         self.part != PART_ICON))
+            dmp2_inline = self.pixel_format == b" 8AG"
             rend_data = compress_data(pixel_data, self.pixel_format,
                                       self.width, self.height,
                                       min_deploy=self.min_deploy,
                                       platform=self.platform,
                                       allow_dmp2=use_dmp2,
-                                      dmp2_inline=dmp2_is_inline)
+                                      dmp2_inline=dmp2_inline)
 
         # Template rendering intent → bitmapEncoding field (bits 2-5):
         #   0 (0x00) = original,  4 (0x10) = automatic,  2 (0x08) = template

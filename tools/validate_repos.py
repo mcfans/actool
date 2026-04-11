@@ -142,25 +142,20 @@ def is_failure(report: dict, min_psnr: float = 20.0) -> bool:
                     return True
         if section == "renditions" and diff.get("type") == "mismatches":
             for entry in diff.get("entries", []):
-                has_compression_diff = any(
-                    iss.get("field") == "compression"
-                    for iss in entry.get("issues", []))
                 for iss in entry.get("issues", []):
                     field = iss.get("field", "")
+                    a_val = iss.get("a")
                     b_val = iss.get("b")
-                    # We may use a slightly different compression format
-                    # for edge cases (e.g. system keeps a 1KB image
-                    # uncompressed while we RLE it, or uses KCBC LZFSE
-                    # where we use deepmap2 for inline BGRA at 11.0).
-                    if field == "compression":
-                        continue
-                    # Data size naturally differs with different compression
+                    # Data size naturally differs with different atlas
+                    # packing layouts (lossy recompression produces
+                    # different byte counts).
                     if field == "rend_size":
                         continue
-                    # When compression differs, bpr alignment and opaque
-                    # flags may also differ as a side effect (e.g. DMP2
-                    # requires aligned bpr, uncompressed uses exact).
-                    if has_compression_diff and field in ("bpr", "is_opaque"):
+                    # RLE vs uncompressed is an edge case where our
+                    # encoder barely compresses (or doesn't) while the
+                    # system's does (or vice versa). Both are valid.
+                    if field == "compression" and {a_val, b_val} <= {
+                            "rle", "uncompressed"}:
                         continue
                     return True
         if section == "facets":

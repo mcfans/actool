@@ -283,21 +283,26 @@ class TestCarDmp2Layout(unittest.TestCase):
 
     @unittest.skipUnless(deepmap2.is_available(),
                          "vImage deepmap2 encoder not available")
-    def test_packed_atlases_use_dmp2_at_11_0(self):
-        """Layout 1004 (packed atlas) renditions use DMP2 at target 11.0."""
+    def test_ga8_packed_atlases_use_dmp2_at_11_0(self):
+        """GA8 packed atlas renditions use deepmap2 at target 11.0."""
         entries = self._compile_and_parse("11.0")
-        atlases = [e for e in entries
-                   if e['layout'] == LAYOUT_NAME_LIST and 'celm_comp' in e]
-        self.assertGreater(len(atlases), 0, "No packed atlas renditions found")
-        for e in atlases:
+        ga8_atlases = [e for e in entries
+                       if e['layout'] == LAYOUT_NAME_LIST
+                       and e.get('pixel_format') == b" 8AG"
+                       and 'celm_comp' in e]
+        self.assertGreater(len(ga8_atlases), 0,
+                           "No GA8 packed atlas renditions found")
+        for e in ga8_atlases:
             self.assertEqual(e['celm_comp'], 11,
-                             f"{e['name']}: packed atlas should use DMP2 "
+                             f"{e['name']}: GA8 atlas should use deepmap2 "
                              f"(comp=11), got comp={e['celm_comp']}")
 
-    @unittest.skipUnless(deepmap2.is_available(),
-                         "vImage deepmap2 encoder not available")
-    def test_standalone_bgra_use_dmp2_at_11_0(self):
-        """BGRA standalone (layout 12) renditions use DMP2 at 11.0."""
+    def test_standalone_bgra_use_lzfse_at_11_0(self):
+        """BGRA standalone (layout 12) renditions use KCBC LZFSE at 11.0.
+
+        The system actool uses KCBC LZFSE (not deepmap2) for inline BGRA.
+        Only packed atlases and inline GA8 use deepmap2.
+        """
         entries = self._compile_and_parse("11.0")
         standalone_bgra = [e for e in entries
                            if e['layout'] == LAYOUT_ONE_PART_SCALE
@@ -306,9 +311,9 @@ class TestCarDmp2Layout(unittest.TestCase):
         self.assertGreater(len(standalone_bgra), 0,
                            "No standalone BGRA renditions found")
         for e in standalone_bgra:
-            self.assertEqual(e['celm_comp'], 11,
-                             f"{e['name']}: standalone BGRA should use DMP2 "
-                             f"at 11.0, got comp={e['celm_comp']}")
+            self.assertEqual(e['celm_comp'], 4,
+                             f"{e['name']}: standalone BGRA should use KCBC "
+                             f"LZFSE at 11.0, got comp={e['celm_comp']}")
 
     def test_no_dmp2_at_10_15(self):
         """No renditions use DMP2 when target is 10.15."""
@@ -367,8 +372,8 @@ class TestCarDmp2Layout(unittest.TestCase):
 
     @unittest.skipUnless(deepmap2.is_available(),
                          "vImage deepmap2 encoder not available")
-    def test_dmp2_mixed_pixel_formats(self):
-        """Both BGRA and GA8 atlases use DMP2 at target 11.0."""
+    def test_dmp2_ga8_atlases_only(self):
+        """Only GA8 atlases use deepmap2 at 11.0; BGRA uses KCBC LZFSE."""
         catalog, _ = make_temp_catalog(
             [("RgbA", "RGBA"), ("RgbB", "RGBA"),
              ("GrayA", "LA"), ("GrayB", "LA")],
@@ -381,8 +386,12 @@ class TestCarDmp2Layout(unittest.TestCase):
                    if e['layout'] == LAYOUT_NAME_LIST and 'celm_comp' in e]
         self.assertGreater(len(atlases), 0)
         for e in atlases:
-            self.assertEqual(e['celm_comp'], 11,
-                             f"{e['name']}: expected DMP2 for mixed catalog")
+            if e.get('pixel_format') == b" 8AG":
+                self.assertEqual(e['celm_comp'], 11,
+                                 f"{e['name']}: GA8 atlas should use deepmap2")
+            elif e.get('pixel_format') == b"BGRA":
+                self.assertEqual(e['celm_comp'], 4,
+                                 f"{e['name']}: BGRA atlas should use KCBC")
 
 
 # -- CoreUI rendering with DMP2 --

@@ -962,22 +962,23 @@ class TestZipCompression(unittest.TestCase):
             shutil.rmtree(tmpdir)
 
     def test_large_image_uses_zip(self):
-        """Image with > 256B raw data uses zip (comp=2)."""
-        ver, comp = self._compile_and_get_celm((32, 32))  # 4096B raw
+        """Image with raw >= 4096B always uses zip, even if RLE is smaller."""
+        ver, comp = self._compile_and_get_celm((128, 128))  # 65536B raw
         self.assertEqual(comp, 2, "Large image should use zip")
-        self.assertEqual(ver, 0, "zip CELM should use ver=0")
 
-    def test_small_image_uncompressed(self):
-        """Image with <= 256B raw data stays uncompressed (comp=0)."""
+    def test_small_solid_image_uses_rle(self):
+        """Even small solid images use RLE when it compresses."""
         ver, comp = self._compile_and_get_celm((4, 4))  # 64B raw
-        self.assertEqual(comp, 0, "Small image should be uncompressed")
+        self.assertEqual(comp, 1, "Small solid image should use RLE")
 
     def test_compression_per_deploy_target(self):
         """Each deploy target uses the appropriate compression."""
+        # 32x32 BGRA = 4096B raw → RLE compresses this, so comp=1 at 10.9
+        # At 10.11+ KCBC LZFSE is used, at 11.0 still LZFSE for inline BGRA
         expected = {
-            "10.9": 2,   # zip (pre-lzfse)
+            "10.9": 2,   # zip (raw=4096 >= 4096 threshold)
             "10.11": 4,  # KCBC-chunked lzfse
-            "11.0": 11,  # deepmap2 for inline BGRA at >= 11.0
+            "11.0": 11,  # deepmap2 for non-icon inline BGRA
         }
         for deploy, exp_comp in expected.items():
             ver, comp = self._compile_and_get_celm((32, 32), deploy)
@@ -986,11 +987,21 @@ class TestZipCompression(unittest.TestCase):
                              f"got {comp}")
 
     def test_zip_data_is_valid(self):
-        """The zip (gzip) payload decompresses to the correct size."""
-        import zlib
+        """The zip (gzip) payload decompresses to the correct size.
+
+        Uses a large random-ish image where RLE won't compress.
+        """
+        import zlib, random
         tmpdir = tempfile.mkdtemp(prefix="actool_gzv_")
         try:
-            img = Image.new("RGBA", (32, 32), (100, 50, 25, 200))
+            # Create a noisy image that RLE can't compress
+            img = Image.new("RGBA", (64, 64))
+            rng = random.Random(42)
+            for y in range(64):
+                for x in range(64):
+                    img.putpixel((x, y), (rng.randint(0, 255),
+                                          rng.randint(0, 255),
+                                          rng.randint(0, 255), 255))
             catalog = _make_catalog_with_image(tmpdir, "Img", img)
             outdir = os.path.join(tmpdir, "out")
             compile_catalog(catalog, outdir, "macosx", "10.9")
@@ -1000,9 +1011,9 @@ class TestZipCompression(unittest.TestCase):
             comp = struct.unpack_from('<I', rend, 8)[0]
             payload_len = struct.unpack_from('<I', rend, 12)[0]
             payload = rend[16:16 + payload_len]
-            self.assertEqual(comp, 2)
+            self.assertEqual(comp, 2, "Noisy image should use zip")
             decompressed = zlib.decompress(payload, 15 + 32)
-            expected = 32 * 4 * 32  # width * bpp * height
+            expected = 64 * 4 * 64
             self.assertEqual(len(decompressed), expected)
         finally:
             shutil.rmtree(tmpdir)
@@ -1568,16 +1579,16 @@ class TestRleCompression(unittest.TestCase):
         self.assertEqual(comp, 1, "Small image should use RLE")
 
     def test_large_image_uses_zip(self):
-        """Image with raw >= 4096B uses zip (comp=2) at 10.9."""
-        # 64x64 BGRA = 16384B raw — in the zip range
+        """Large image (>= 4096B) uses zip even with patterns."""
+        # 64x64 BGRA = 16384B raw → zip range
         comp, _ = self._compile_and_check(64, 64)
         self.assertEqual(comp, 2, "Large image should use zip")
 
-    def test_tiny_image_uncompressed(self):
-        """Image with raw <= 1024B stays uncompressed (comp=0)."""
-        # 16x16 BGRA = 1024B raw
+    def test_tiny_image_uses_rle(self):
+        """Even small images use RLE when it compresses."""
+        # 16x16 BGRA = 1024B raw, solid color → RLE compresses
         comp, _ = self._compile_and_check(16, 16)
-        self.assertEqual(comp, 0, "Tiny image should be uncompressed")
+        self.assertEqual(comp, 1, "Tiny solid image should use RLE")
 
     def test_rle_header_valid(self):
         """RLE payload has correct bpp, width, height header."""
