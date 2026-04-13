@@ -12,20 +12,10 @@ from pathlib import Path
 
 from PIL import Image
 
-from .icns import create_icns, _make_exif, _make_argb, _reencode_png
+from .icns import create_icns
 from . import car
 from .bom import BOMWriter
-from .packer import PackedImage, pack_images
-
-
-# Standard macOS icon point sizes and their scales
-ICON_SIZES = [
-    (16, 1), (16, 2),
-    (32, 1), (32, 2),
-    (128, 1), (128, 2),
-    (256, 1), (256, 2),
-    (512, 1), (512, 2),
-]
+from .catalog import MACOS_ICON_SIZES, ICON_DIM2_MAP
 
 
 def is_icon_bundle(path: str) -> bool:
@@ -71,7 +61,6 @@ def compile_icon_bundle(icon_path: str, output_dir: str, platform: str,
     output_files = []
 
     if has_svg:
-        # SVG-based bundles: store each SVG as raw data
         car_path = os.path.join(output_dir, "Assets.car")
         _build_svg_icon_car(car_path, icon_name, source_images,
                             platform, min_deploy)
@@ -85,7 +74,7 @@ def compile_icon_bundle(icon_path: str, output_dir: str, platform: str,
         icon_images = []
 
         try:
-            for point_size, scale in ICON_SIZES:
+            for point_size, scale in MACOS_ICON_SIZES:
                 pixel_size = point_size * scale
                 resized = src_img.resize((pixel_size, pixel_size),
                                          Image.LANCZOS)
@@ -206,7 +195,7 @@ def _build_icon_car(car_path: str, icon_name: str, icon_images: list,
     for img_path, pixel_size, scale in icon_images:
         pixel_data, width, height, pixel_format = load_image_as_bgra(img_path)
 
-        dim2 = {16: 1, 32: 2, 128: 3, 256: 4, 512: 5}.get(
+        dim2 = ICON_DIM2_MAP.get(
             pixel_size // scale, 0)
 
         rend = car.Rendition(
@@ -230,7 +219,7 @@ def _build_icon_car(car_path: str, icon_name: str, icon_images: list,
     for img_path, pixel_size, scale in icon_images:
         point_size = pixel_size // scale
         if point_size not in seen:
-            dim2 = {16: 1, 32: 2, 128: 3, 256: 4, 512: 5}.get(point_size, 0)
+            dim2 = ICON_DIM2_MAP.get(point_size, 0)
             ms_entries.append(car.MultisizeImageEntry(
                 width=point_size, height=point_size, index=dim2))
             seen.add(point_size)

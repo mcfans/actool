@@ -6,7 +6,6 @@ All BOM structures use big-endian byte order.
 """
 
 import struct
-from typing import Optional
 
 
 class BOMWriter:

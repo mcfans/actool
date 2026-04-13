@@ -363,19 +363,6 @@ def _build_bitmapkeys(facets, rendition_entries, keyformat_attrs, has_icon):
     return entries
 
 
-def _make_bitmap_info(identifier: int,
-                      renditions: list[car.Rendition]) -> bytes:
-    """Build bitmap info for BITMAPKEYS."""
-    count = sum(1 for r in renditions if r.identifier == identifier)
-    buf = struct.pack("<I", 1)
-    buf += struct.pack("<I", 0)
-    buf += struct.pack("<I", count)
-    buf += struct.pack("<I", len(car.KEYFORMAT_ATTRS))
-    for attr in car.KEYFORMAT_ATTRS:
-        buf += struct.pack("<I", 0xFFFFFFFF)
-    return buf
-
-
 def _write_info_plist(path: str, app_icon: str = None,
                       accent_color: str = None,
                       widget_background_color: str = None,

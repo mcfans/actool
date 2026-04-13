@@ -13,9 +13,7 @@ Packing rules:
 - Minimum 2 images per format/scale group to trigger packing
 """
 
-import struct
 from dataclasses import dataclass, field
-from typing import Optional
 
 from PIL import Image
 
@@ -285,7 +283,7 @@ def group_for_packing(renditions) -> tuple[list, list]:
 
     # Group by (pixel_format, scale)
     groups: dict[tuple[bytes, int], list] = {}
-    icon_renditions = []
+    force_inline = []
 
     # Threshold: icon images >= 256px are stored inline
     ICON_INLINE_THRESHOLD = 256
@@ -298,20 +296,20 @@ def group_for_packing(renditions) -> tuple[list, list]:
         # Multisize, color, and data renditions are always inline
         if rend.layout in (car.LAYOUT_MULTISIZE_IMAGE, car.LAYOUT_COLOR,
                            car.LAYOUT_RAW_DATA, car.LAYOUT_METADATA):
-            icon_renditions.append(rend)
+            force_inline.append(rend)
             continue
         # Large app icon renditions are stored inline
         if rend.part == car.PART_ICON and rend.width >= ICON_INLINE_THRESHOLD:
-            icon_renditions.append(rend)
+            force_inline.append(rend)
             continue
         # Renditions with CSI overrides (pre-built) are always inline
         if hasattr(rend, '_csi_override'):
-            icon_renditions.append(rend)
+            force_inline.append(rend)
             continue
         # Images too large for atlas packing are stored inline
         if (rend.width >= PACK_MAX_WIDTH - PACK_MARGIN or
                 rend.height >= PACK_MAX_HEIGHT - PACK_MARGIN):
-            icon_renditions.append(rend)
+            force_inline.append(rend)
             continue
         # Group by format, scale, and sprite atlas
         # Icons pack together with regular images (Apple doesn't separate them)
@@ -326,7 +324,7 @@ def group_for_packing(renditions) -> tuple[list, list]:
     # and the system actool requires at least 2 distinct imagesets
     # before packing into an atlas.
     pack_groups = []
-    inline = list(icon_renditions)
+    inline = list(force_inline)
 
     for (fmt, scale, _atlas_id), rends in sorted(groups.items()):
         distinct_facets = len({r.identifier for r in rends})

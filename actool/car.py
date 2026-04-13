@@ -61,6 +61,11 @@ PIXELFMT_PDF = b" FDP"   # 'PDF ' as LE uint32
 PIXELFMT_SVG = b" GVS"   # 'SVG ' as LE uint32
 
 
+def colorspace_for_pixel_format(pixel_format: bytes) -> int:
+    """Return the colorspace ID for a pixel format: 2 for GA8, 1 for BGRA."""
+    return 2 if pixel_format == b" 8AG" else 1
+
+
 def compute_keyformat(renditions, force_dim1: bool = False) -> list[int]:
     """Compute the dynamic KEYFORMAT based on which attributes are used.
 
@@ -537,7 +542,7 @@ def build_packed_image_csi(name: str, width: int, height: int,
     tlv += make_blend_opacity_tlv()
     tlv += make_exif_orientation_tlv()
 
-    cs_id = 2 if pixel_format == b" 8AG" else 1
+    cs_id = colorspace_for_pixel_format(pixel_format)
     return build_csi(
         width=width, height=height, scale_factor=scale_factor,
         pixel_format=pixel_format, layout=LAYOUT_PACKED_IMAGE,
@@ -585,7 +590,7 @@ def build_packed_asset_csi(name: str, width: int, height: int,
     tlv += struct.pack("<II", 0x03EF, 4) + struct.pack("<I", bpr)
 
     # GA8 images use colorspace 2 (gray gamma 2.2)
-    cs_id = 2 if pixel_format == b" 8AG" else 1
+    cs_id = colorspace_for_pixel_format(pixel_format)
 
     return build_csi(
         width=width, height=height, scale_factor=scale_factor,

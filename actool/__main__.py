@@ -265,8 +265,6 @@ def main():
             errors_list=errors,
             notices_list=notices,
         )
-    except FileNotFoundError as e:
-        errors.append({"description": str(e)})
     except Exception as e:
         errors.append({"description": str(e)})
 

@@ -6,6 +6,7 @@ Reads .xcassets directories and produces Rendition objects for compilation.
 
 import json
 import os
+import re
 import struct
 from pathlib import Path
 from typing import Optional
@@ -130,27 +131,12 @@ def load_image_as_bgra(path: str,
         # Grayscale -> add alpha channel (fully opaque, premultiply is no-op)
         img = img.convert("LA")
         return img.tobytes(), img.width, img.height, b" 8AG"
-    elif img.mode == "RGB":
-        # Add alpha channel, convert to BGRA
-        img = img.convert("RGBA")
-        r, g, b, a = img.split()
-        img = Image.merge("RGBA", (b, g, r, a))
-        pixel_data = img.tobytes()
-        return pixel_data, img.width, img.height, b"BGRA"
-    elif img.mode == "P":
-        # Palette mode - convert to RGBA then BGRA
-        img = img.convert("RGBA")
-        r, g, b, a = img.split()
-        img = Image.merge("RGBA", (b, g, r, a))
-        pixel_data = img.tobytes()
-        return pixel_data, img.width, img.height, b"BGRA"
     else:
-        # Convert anything else to RGBA -> BGRA
+        # RGB, P, and any other mode: convert to RGBA then BGRA
         img = img.convert("RGBA")
         r, g, b, a = img.split()
         img = Image.merge("RGBA", (b, g, r, a))
-        pixel_data = img.tobytes()
-        return pixel_data, img.width, img.height, b"BGRA"
+        return img.tobytes(), img.width, img.height, b"BGRA"
 
 
 def _parse_color_component(value: str) -> float:
@@ -165,7 +151,6 @@ def _parse_color_component(value: str) -> float:
     values are cast through float32 because Apple's actool parses them
     with single-precision intermediates (matching `strtof` behavior).
     """
-    import struct as _struct
     if value.startswith("0x") or value.startswith("0X"):
         return int(value, 16) / 255.0
     # Integer form ("128") has no decimal point or exponent.
@@ -178,7 +163,7 @@ def _parse_color_component(value: str) -> float:
     if f > 1.0:
         return f / 255.0
     # Cast through float32 to match Apple's single-precision parsing.
-    return _struct.unpack('<f', _struct.pack('<f', f))[0]
+    return struct.unpack('<f', struct.pack('<f', f))[0]
 
 
 class AssetCatalog:
@@ -453,7 +438,7 @@ class AssetCatalog:
                 layout=car.LAYOUT_ONE_PART_SCALE,
                 template_rendering_intent=template_intent,
                 locale=locale,
-                colorspace_id=2 if pixel_format == b" 8AG" else 1,
+                colorspace_id=car.colorspace_for_pixel_format(pixel_format),
             )
             renditions.append(rend)
 
@@ -590,7 +575,7 @@ class AssetCatalog:
                 layout=car.LAYOUT_ONE_PART_SCALE,
                 dim2=dim2,
                 template_rendering_intent=0,  # Icons are always original
-                colorspace_id=2 if pixel_format == b" 8AG" else 1,
+                colorspace_id=car.colorspace_for_pixel_format(pixel_format),
             )
             renditions.append(rend)
             icon_renditions.append((rend, point_w, pixel_size))
@@ -624,7 +609,6 @@ class AssetCatalog:
         follow the naming convention icon_{W}x{H}[@{scale}x].png.
         All .iconset directories are processed (no --app-icon gate).
         """
-        import re
         name = item.stem
         facet_name = namespace + name
         ident = self._get_identifier(facet_name)
@@ -664,7 +648,7 @@ class AssetCatalog:
                 layout=car.LAYOUT_ONE_PART_SCALE,
                 dim2=dim2,
                 template_rendering_intent=0,
-                colorspace_id=2 if pixel_format == b" 8AG" else 1,
+                colorspace_id=car.colorspace_for_pixel_format(pixel_format),
             )
             renditions.append(rend)
             icon_renditions.append((rend, point_w))
@@ -839,7 +823,7 @@ class AssetCatalog:
                         pixel_format=pixel_format,
                         layout=car.LAYOUT_ONE_PART_SCALE,
                         sprite_atlas_id=atlas_ident,
-                        colorspace_id=2 if pixel_format == b" 8AG" else 1,
+                        colorspace_id=car.colorspace_for_pixel_format(pixel_format),
                     )
                     renditions.append(rend)
 
@@ -913,7 +897,7 @@ class AssetCatalog:
                     pixel_data=pixel_data,
                     pixel_format=pixel_format,
                     layout=car.LAYOUT_ONE_PART_SCALE,
-                    colorspace_id=2 if pixel_format == b" 8AG" else 1,
+                    colorspace_id=car.colorspace_for_pixel_format(pixel_format),
                 )
                 renditions.append(rend)
 
