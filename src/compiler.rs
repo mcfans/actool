@@ -287,10 +287,27 @@ pub fn compile_catalog(
     let bitmap_entries = build_bitmapkeys(&facets, &all_entries, &keyformat);
     bom.add_raw_key_tree("BITMAPKEYS", &bitmap_entries, 1024);
 
+    let produce_car = !all_entries.is_empty();
     let car_path = output_dir.join("Assets.car");
-    bom.write(&car_path)?;
+    if produce_car {
+        bom.write(&car_path)?;
+    }
 
     let mut output_files: Vec<PathBuf> = Vec::new();
+
+    // Loose JPEG files for deployment targets below the per-platform
+    // JPEG-in-CAR threshold. Named after the imageset stem with the
+    // source file's extension preserved (matches host actool).
+    for (imageset_stem, src) in &catalog.loose_jpegs {
+        let ext = src
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("jpg");
+        let dest = output_dir.join(format!("{imageset_stem}.{ext}"));
+        fs::copy(src, &dest)?;
+        output_files.push(fs::canonicalize(&dest).unwrap_or(dest));
+    }
+
     if let Some(icon_name) = app_icon {
         if standalone_icon_behavior != "none" {
             let icons = catalog.get_icon_images()?;
@@ -302,7 +319,9 @@ pub fn compile_catalog(
         }
     }
 
-    output_files.push(fs::canonicalize(&car_path).unwrap_or(car_path));
+    if produce_car {
+        output_files.push(fs::canonicalize(&car_path).unwrap_or(car_path));
+    }
 
     if let Some(path) = info_plist_path {
         let locales = if plist_localizations {

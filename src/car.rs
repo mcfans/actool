@@ -37,6 +37,7 @@ pub const LAYOUT_MULTISIZE_IMAGE: u16 = 1010;
 pub const PIXELFMT_DATA: &[u8; 4] = b"ATAD";
 pub const PIXELFMT_PDF: &[u8; 4] = b" FDP";
 pub const PIXELFMT_SVG: &[u8; 4] = b" GVS";
+pub const PIXELFMT_JPEG: &[u8; 4] = b"GEPJ";
 
 pub fn colorspace_for_pixel_format(pixel_format: &[u8]) -> u32 {
     if pixel_format == b" 8AG" {
@@ -819,6 +820,86 @@ pub fn build_pdf_csi(filename: &str, pdf_data: &[u8]) -> Vec<u8> {
         &tlv,
         &rawd,
         0x04,
+        0,
+        1,
+    )
+}
+
+/// Extract (width, height) from a JPEG's SOFn marker. Returns (0, 0) if
+/// the file isn't a recognizable JPEG.
+pub fn jpeg_dimensions(data: &[u8]) -> (u32, u32) {
+    if data.len() < 4 || &data[..2] != [0xFF, 0xD8].as_ref() {
+        return (0, 0);
+    }
+    let mut i = 2;
+    while i + 3 < data.len() {
+        if data[i] != 0xFF {
+            return (0, 0);
+        }
+        // skip fill bytes
+        while i < data.len() && data[i] == 0xFF {
+            i += 1;
+        }
+        if i >= data.len() {
+            return (0, 0);
+        }
+        let marker = data[i];
+        i += 1;
+        // Standalone markers without a length field
+        if (0xD0..=0xD9).contains(&marker) || marker == 0x01 {
+            continue;
+        }
+        if i + 2 > data.len() {
+            return (0, 0);
+        }
+        let seg_len = u16::from_be_bytes([data[i], data[i + 1]]) as usize;
+        // SOF markers: 0xC0-0xCF except DHT (0xC4), JPG (0xC8), DAC (0xCC)
+        let is_sof = (0xC0..=0xCF).contains(&marker)
+            && marker != 0xC4
+            && marker != 0xC8
+            && marker != 0xCC;
+        if is_sof {
+            if i + 7 > data.len() {
+                return (0, 0);
+            }
+            let h = u16::from_be_bytes([data[i + 3], data[i + 4]]) as u32;
+            let w = u16::from_be_bytes([data[i + 5], data[i + 6]]) as u32;
+            return (w, h);
+        }
+        i += seg_len;
+    }
+    (0, 0)
+}
+
+/// Build a CSI for a JPEG image rendition (layout 12, pixfmt `GEPJ`).
+///
+/// JPEG bytes are stored raw inside a DWAR container — CoreUI decodes
+/// the JPEG at render time. Unlike PDF/SVG, JPEG uses layout 12 with
+/// real Slices/Metrics TLVs (width/height from the SOFn marker).
+pub fn build_jpeg_csi(filename: &str, jpeg_data: &[u8]) -> Vec<u8> {
+    let (width, height) = jpeg_dimensions(jpeg_data);
+    let mut rawd = Vec::new();
+    rawd.extend_from_slice(b"DWAR");
+    rawd.write_u32::<LittleEndian>(0).unwrap();
+    rawd.write_u32::<LittleEndian>(jpeg_data.len() as u32).unwrap();
+    rawd.extend_from_slice(jpeg_data);
+
+    let mut tlv = Vec::new();
+    tlv.extend(make_slices_tlv(width, height));
+    tlv.extend(make_metrics_tlv(width, height));
+    tlv.extend(make_blend_opacity_tlv());
+    tlv.extend(make_exif_orientation_tlv(1));
+
+    build_csi(
+        0,
+        0,
+        100,
+        PIXELFMT_JPEG,
+        LAYOUT_ONE_PART_SCALE,
+        filename,
+        &tlv,
+        &rawd,
+        0x10,
         0,
         1,
     )

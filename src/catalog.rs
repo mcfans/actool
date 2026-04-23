@@ -186,6 +186,18 @@ fn min_ga8_version(platform: &str) -> (u32, u32) {
     }
 }
 
+/// Minimum deployment target at which host actool embeds JPEGs into the
+/// CAR as DWAR-wrapped raw data. Below this, the host emits a loose file.
+/// Verified against /usr/bin/actool: macOS 10.9 -> loose file, 10.10 -> CAR.
+fn min_jpeg_car_version(platform: &str) -> (u32, u32) {
+    match platform {
+        "macosx" => (10, 10),
+        "iphoneos" | "appletvos" => (9, 0),
+        "watchos" => (2, 0),
+        _ => (10, 10),
+    }
+}
+
 pub struct AssetCatalog {
     pub path: PathBuf,
     pub platform: String,
@@ -196,6 +208,11 @@ pub struct AssetCatalog {
     identifiers: IndexMap<String, u16>,
     locales_used: HashSet<String>,
     force_bgra: bool,
+    /// JPEG imageset entries to copy out as loose files when the
+    /// deployment target is below the `min_jpeg_car_version`.
+    /// Entries are `(imageset_stem, source_path)`.
+    pub loose_jpegs: Vec<(String, PathBuf)>,
+    jpeg_in_car: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -221,6 +238,7 @@ impl AssetCatalog {
             (a, b)
         };
         let force_bgra = deploy < min_ga8_version(&platform);
+        let jpeg_in_car = deploy >= min_jpeg_car_version(&platform);
         Self {
             path,
             platform,
@@ -231,6 +249,8 @@ impl AssetCatalog {
             identifiers: IndexMap::new(),
             locales_used: HashSet::new(),
             force_bgra,
+            loose_jpegs: Vec::new(),
+            jpeg_in_car,
         }
     }
 
@@ -421,6 +441,37 @@ impl AssetCatalog {
                 };
                 rend.csi_override = Some(csi);
                 renditions.push(rend);
+                continue;
+            }
+
+            if lower_filename.ends_with(".jpg") || lower_filename.ends_with(".jpeg") {
+                if self.jpeg_in_car {
+                    let jpeg_data = fs::read(&img_path)?;
+                    let csi = car::build_jpeg_csi(filename, &jpeg_data);
+                    let mut rend = Rendition {
+                        name: filename.to_string(),
+                        identifier: ident,
+                        element: car::ELEMENT_UNIVERSAL,
+                        part: car::PART_REGULAR,
+                        scale: scale as u16,
+                        appearance,
+                        direction,
+                        layout: car::LAYOUT_ONE_PART_SCALE,
+                        pixel_format: *car::PIXELFMT_JPEG,
+                        template_rendering_intent: template_intent,
+                        locale: locale.clone(),
+                        colorspace_id: 0,
+                        min_deploy: self.min_deploy.clone(),
+                        platform: self.platform.clone(),
+                        ..Rendition::default()
+                    };
+                    rend.csi_override = Some(csi);
+                    renditions.push(rend);
+                } else {
+                    // Pre-10.10 macOS targets don't support JPEG-in-CAR —
+                    // emit a loose file alongside the compiled output.
+                    self.loose_jpegs.push((name.clone(), img_path.clone()));
+                }
                 continue;
             }
 
