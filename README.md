@@ -1,4 +1,4 @@
-# ibtool reimplementation
+# actool reimplementation
 
 This project reimplements the behaviour of Apple's `actool`. It's a clean
 reimplementation based just on the behaviour and the awesome research from
