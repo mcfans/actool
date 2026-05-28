@@ -24,6 +24,9 @@ pub const PART_ICON_MULTISIZE: u16 = 218;
 pub const PART_REGULAR: u16 = 181;
 pub const PART_COLOR: u16 = 217;
 pub const PART_SPRITE_ATLAS: u16 = 127;
+// IconComposer (.icon) part IDs observed in Apple's actool output.
+pub const PART_ICON_COMPOSER: u16 = 245;
+pub const PART_ICON_GROUP: u16 = 246;
 
 pub const LAYOUT_PDF: u16 = 9;
 pub const LAYOUT_ONE_PART_SCALE: u16 = 12;

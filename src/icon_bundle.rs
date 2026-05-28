@@ -125,7 +125,9 @@ pub fn compile_icon_bundle(
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
-    let icon_name = app_icon.map(|s| s.to_string()).unwrap_or(bundle_stem);
+    // --app-icon controls the .icns filename and Info.plist value, but
+    // Apple's actool always names the in-CAR facet after the bundle stem.
+    let icon_name = app_icon.map(|s| s.to_string()).unwrap_or(bundle_stem.clone());
 
     let icon_json_path = icon_path.join("icon.json");
     let icon_json_text = fs::read_to_string(&icon_json_path)?;
@@ -140,6 +142,11 @@ pub fn compile_icon_bundle(
         .any(|p| p.to_string_lossy().to_lowercase().ends_with(".svg"));
     let facet_prefix = bundle_facet_prefix(icon_path);
     let layer_assets = collect_layer_assets(icon_path, &parsed, &facet_prefix);
+    let group_facet_names: Vec<String> = parsed
+        .groups
+        .iter()
+        .filter_map(|g| g.name.as_ref().map(|n| format!("{facet_prefix}/{n}")))
+        .collect();
 
     let mut output_files: Vec<PathBuf> = Vec::new();
 
@@ -173,7 +180,15 @@ pub fn compile_icon_bundle(
             }
         }
         let car_path = output_dir.join("Assets.car");
-        build_icon_car(&car_path, &icon_name, &icon_images, &layer_assets, platform, min_deploy)?;
+        build_icon_car(
+            &car_path,
+            &facet_prefix,
+            &icon_images,
+            &layer_assets,
+            &group_facet_names,
+            platform,
+            min_deploy,
+        )?;
         output_files.push(fs::canonicalize(&car_path).unwrap_or(car_path));
         let _ = fs::remove_dir_all(&tmpdir);
     }
@@ -304,11 +319,13 @@ fn build_svg_icon_car(
     write_icon_car(car_path, &facets, &keyformat, &all_entries, platform, min_deploy)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_icon_car(
     car_path: &Path,
     icon_name: &str,
     icon_images: &[(PathBuf, u32, u32)],
     layer_assets: &[LayerAsset],
+    group_facet_names: &[String],
     platform: &str,
     min_deploy: &str,
 ) -> Result<()> {
@@ -368,9 +385,21 @@ fn build_icon_car(
     let mut facets: Vec<FacetEntry> = vec![(
         icon_name.to_string(),
         car::ELEMENT_UNIVERSAL,
-        Some(car::PART_ICON),
+        Some(car::PART_ICON_COMPOSER),
         ident,
     )];
+    // Group facets — `<stem>/<group_name>` — appear in Apple's FACETKEYS
+    // alongside the main icon. We don't emit IconGroup renditions yet, but
+    // registering the facet lets CoreUI enumerate them.
+    for gname in group_facet_names {
+        let gid = hash_name(gname);
+        facets.push((
+            gname.clone(),
+            car::ELEMENT_UNIVERSAL,
+            Some(car::PART_ICON_GROUP),
+            gid,
+        ));
+    }
     for asset in layer_assets {
         let asset_ident = hash_name(&asset.facet_name);
         let (pd, w, h, pf) = load_image_as_bgra(&asset.source_path, false)?;
