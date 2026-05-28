@@ -27,6 +27,7 @@ pub const PART_SPRITE_ATLAS: u16 = 127;
 // IconComposer (.icon) part IDs observed in Apple's actool output.
 pub const PART_ICON_COMPOSER: u16 = 245;
 pub const PART_ICON_GROUP: u16 = 246;
+pub const PART_ICON_GRADIENT: u16 = 247;
 
 pub const LAYOUT_PDF: u16 = 9;
 pub const LAYOUT_ONE_PART_SCALE: u16 = 12;
@@ -724,6 +725,78 @@ pub fn build_packed_asset_csi(
         &rend_data,
         0,
         cs_id,
+        1,
+    )
+}
+
+/// Color rendition (LAYOUT_COLOR=1009) used by IconComposer asset fills.
+/// `components` is whatever the colorspace expects: 2 floats for gray+alpha,
+/// 5 for srgba, etc. Matches Apple's RLOC blob layout.
+pub fn build_icon_color_csi(name: &str, colorspace_id: u32, components: &[f64]) -> Vec<u8> {
+    let mut colr = Vec::new();
+    colr.extend_from_slice(b"RLOC");
+    colr.write_u32::<LittleEndian>(1).unwrap();
+    colr.write_u32::<LittleEndian>(colorspace_id).unwrap();
+    colr.write_u32::<LittleEndian>(components.len() as u32).unwrap();
+    for c in components {
+        colr.write_f64::<LittleEndian>(*c).unwrap();
+    }
+    let mut tlv = Vec::new();
+    tlv.extend(make_color_blend_opacity_tlv());
+    tlv.extend(make_exif_orientation_tlv(1));
+    build_csi(
+        0,
+        0,
+        0,
+        b"\x00\x00\x00\x00",
+        LAYOUT_COLOR,
+        name,
+        &tlv,
+        &colr,
+        0,
+        0,
+        1,
+    )
+}
+
+/// Gradient rendition (LAYOUT_GRADIENT=1021) used by IconComposer fills.
+/// `geom` is (x0, y0, x1, y1) for the start/end points in [0,1] icon space.
+/// Each stop is (position, color_facet_name) — the named color must exist
+/// elsewhere in the catalog as an `icon_Assets/Color-N` rendition.
+pub fn build_icon_gradient_csi(
+    name: &str,
+    geom: [f32; 4],
+    stops: &[(f32, &str)],
+) -> Vec<u8> {
+    let mut grad = Vec::new();
+    grad.extend_from_slice(b"ARGG");
+    grad.write_u32::<LittleEndian>(stops.len() as u32).unwrap();
+    grad.write_u32::<LittleEndian>(1).unwrap();
+    grad.write_u32::<LittleEndian>(0).unwrap();
+    for f in geom.iter() {
+        grad.write_f32::<LittleEndian>(*f).unwrap();
+    }
+    for (pos, color_name) in stops {
+        grad.write_f32::<LittleEndian>(*pos).unwrap();
+        let b = color_name.as_bytes();
+        grad.write_u32::<LittleEndian>((b.len() + 1) as u32).unwrap();
+        grad.extend_from_slice(b);
+        grad.write_u8(0).unwrap();
+    }
+    let mut tlv = Vec::new();
+    tlv.extend(make_color_blend_opacity_tlv());
+    tlv.extend(make_exif_orientation_tlv(1));
+    build_csi(
+        0,
+        0,
+        0,
+        b"\x00\x00\x00\x00",
+        LAYOUT_GRADIENT,
+        name,
+        &tlv,
+        &grad,
+        0,
+        0,
         1,
     )
 }

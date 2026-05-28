@@ -4,7 +4,7 @@ use crate::bom::BomWriter;
 use crate::car::{self, MultisizeImageEntry, Rendition};
 use crate::catalog::load_image_as_bgra;
 use crate::icns;
-use crate::icon_json::IconJson;
+use crate::icon_json::{Fill, IconJson};
 use crate::name_hash::hash_name;
 use anyhow::Result;
 use image::imageops::FilterType;
@@ -147,6 +147,11 @@ pub fn compile_icon_bundle(
         .iter()
         .filter_map(|g| g.name.as_ref().map(|n| format!("{facet_prefix}/{n}")))
         .collect();
+    let (color_assets, gradient_assets) = if fill_is_automatic(parsed.fill.as_ref()) {
+        automatic_fill_assets(&facet_prefix)
+    } else {
+        (Vec::new(), Vec::new())
+    };
 
     let mut output_files: Vec<PathBuf> = Vec::new();
 
@@ -186,6 +191,8 @@ pub fn compile_icon_bundle(
             &icon_images,
             &layer_assets,
             &group_facet_names,
+            &color_assets,
+            &gradient_assets,
             platform,
             min_deploy,
         )?;
@@ -326,6 +333,8 @@ fn build_icon_car(
     icon_images: &[(PathBuf, u32, u32)],
     layer_assets: &[LayerAsset],
     group_facet_names: &[String],
+    color_assets: &[ColorAsset],
+    gradient_assets: &[GradientAsset],
     platform: &str,
     min_deploy: &str,
 ) -> Result<()> {
@@ -433,6 +442,73 @@ fn build_icon_car(
         ));
     }
 
+    for color in color_assets {
+        let cident = hash_name(&color.facet_name);
+        let csi = car::build_icon_color_csi(
+            &color.facet_name,
+            color.colorspace_id,
+            &color.components,
+        );
+        renditions.push(Rendition {
+            name: color.facet_name.clone(),
+            identifier: cident,
+            element: car::ELEMENT_UNIVERSAL,
+            part: car::PART_COLOR,
+            scale: 0,
+            width: 0,
+            height: 0,
+            pixel_data: Vec::new(),
+            pixel_format: *b"\0\0\0\0",
+            layout: car::LAYOUT_COLOR,
+            keyformat: placeholder_kf.clone(),
+            min_deploy: min_deploy.to_string(),
+            platform: platform.to_string(),
+            colorspace_id: 0,
+            csi_override: Some(csi),
+            ..Rendition::default()
+        });
+        facets.push((
+            color.facet_name.clone(),
+            car::ELEMENT_UNIVERSAL,
+            Some(car::PART_COLOR),
+            cident,
+        ));
+    }
+
+    for grad in gradient_assets {
+        let gident = hash_name(&grad.facet_name);
+        let stops: Vec<(f32, &str)> = grad
+            .stops
+            .iter()
+            .map(|(p, name)| (*p, name.as_str()))
+            .collect();
+        let csi = car::build_icon_gradient_csi(&grad.facet_name, grad.geometry, &stops);
+        renditions.push(Rendition {
+            name: grad.facet_name.clone(),
+            identifier: gident,
+            element: car::ELEMENT_UNIVERSAL,
+            part: car::PART_ICON_GRADIENT,
+            scale: 0,
+            width: 0,
+            height: 0,
+            pixel_data: Vec::new(),
+            pixel_format: *b"\0\0\0\0",
+            layout: car::LAYOUT_GRADIENT,
+            keyformat: placeholder_kf.clone(),
+            min_deploy: min_deploy.to_string(),
+            platform: platform.to_string(),
+            colorspace_id: 0,
+            csi_override: Some(csi),
+            ..Rendition::default()
+        });
+        facets.push((
+            grad.facet_name.clone(),
+            car::ELEMENT_UNIVERSAL,
+            Some(car::PART_ICON_GRADIENT),
+            gident,
+        ));
+    }
+
     let keyformat = car::compute_keyformat(&renditions, false);
     for rend in &mut renditions {
         rend.keyformat = keyformat.clone();
@@ -454,6 +530,85 @@ fn build_icon_car(
 pub struct LayerAsset {
     pub facet_name: String,
     pub source_path: PathBuf,
+}
+
+/// A solid color asset extracted from icon.json `fill` / `fill-specializations`.
+struct ColorAsset {
+    facet_name: String,
+    colorspace_id: u32,
+    components: Vec<f64>,
+}
+
+/// A linear gradient asset extracted from icon.json `fill` specs. Stops
+/// reference Color assets by facet name (e.g. "icon_Assets/Color-2").
+struct GradientAsset {
+    facet_name: String,
+    geometry: [f32; 4],
+    stops: Vec<(f32, String)>,
+}
+
+/// Apple's default palette for `fill: "automatic"`. Empirically observed in
+/// actool output: a special white anchor color, light-mode bg gradient
+/// (Color-2 → Color-3), and dark-mode bg gradient (Color-4 → Color-5).
+///
+/// Apple's actool stores the gray channel as `f64(f32(v))` — i.e. promotes
+/// from a 32-bit float to a 64-bit field. We round-trip through f32 so the
+/// emitted CSI bytes match Apple's exactly.
+fn automatic_fill_assets(facet_prefix: &str) -> (Vec<ColorAsset>, Vec<GradientAsset>) {
+    let n = |s: &str| format!("{facet_prefix}_Assets/{s}");
+    let g = |v: f32| (v as f32) as f64;
+    let colors = vec![
+        ColorAsset {
+            facet_name: n("Color-1"),
+            colorspace_id: 6,
+            components: vec![g(1.0), g(1.0)],
+        },
+        ColorAsset {
+            facet_name: n("Color-2"),
+            colorspace_id: 2,
+            components: vec![g(1.0), g(1.0)],
+        },
+        ColorAsset {
+            facet_name: n("Color-3"),
+            colorspace_id: 2,
+            components: vec![g(0.925), g(1.0)],
+        },
+        ColorAsset {
+            facet_name: n("Color-4"),
+            colorspace_id: 2,
+            components: vec![g(0.192), g(1.0)],
+        },
+        ColorAsset {
+            facet_name: n("Color-5"),
+            colorspace_id: 2,
+            components: vec![g(0.078), g(1.0)],
+        },
+    ];
+    let gradients = vec![
+        GradientAsset {
+            facet_name: n("Gradient-1"),
+            geometry: [0.5, 0.0, 0.5, 1.0],
+            stops: vec![(0.0, n("Color-2")), (1.0, n("Color-3"))],
+        },
+        GradientAsset {
+            facet_name: n("Gradient-2"),
+            geometry: [0.5, 0.0, 0.5, 1.0],
+            stops: vec![(0.0, n("Color-4")), (1.0, n("Color-5"))],
+        },
+    ];
+    (colors, gradients)
+}
+
+/// Determine whether `fill` is the "automatic" keyword (the only fill shape
+/// we currently generate Color/Gradient renditions for). Returns true for an
+/// explicit `"automatic"` string AND for an absent fill — Apple's actool
+/// treats both the same way.
+fn fill_is_automatic(fill: Option<&Fill>) -> bool {
+    match fill {
+        None => true,
+        Some(Fill::Keyword(k)) => k == "automatic",
+        Some(Fill::Structured(_)) => false,
+    }
 }
 
 fn write_icon_car(
