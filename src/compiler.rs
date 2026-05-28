@@ -253,7 +253,9 @@ pub fn compile_catalog(
 
     let mut bom = BomWriter::new();
     bom.add_named_block("CARHEADER", car::make_carheader(all_entries.len() as u32));
+    bom.set_inline_key_size(Some(keyformat.len() * 2));
     bom.add_tree("RENDITIONS", &all_entries, 4096);
+    bom.set_inline_key_size(None);
 
     let mut facetkey_entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     let mut facet_names: Vec<_> = facets.keys().cloned().collect();

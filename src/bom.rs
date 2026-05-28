@@ -11,6 +11,7 @@ use std::path::Path;
 pub struct BomWriter {
     blocks: Vec<Vec<u8>>,
     named_blocks: IndexMap<String, usize>,
+    inline_key_size: Option<usize>,
 }
 
 impl BomWriter {
@@ -18,7 +19,16 @@ impl BomWriter {
         Self {
             blocks: vec![Vec::new()], // block 0 is always empty
             named_blocks: IndexMap::new(),
+            inline_key_size: None,
         }
+    }
+
+    /// Set the fixed key size for subsequent `add_tree` calls. When set, the
+    /// leaf node reserves `n_entries * key_size` zero bytes after the
+    /// block_size padding, matching Apple's RENDITIONS leaf layout. Set back
+    /// to `None` before adding variable-key trees (FACETKEYS, APPEARANCEKEYS).
+    pub fn set_inline_key_size(&mut self, size: Option<usize>) {
+        self.inline_key_size = size;
     }
 
     pub fn add_block(&mut self, data: Vec<u8>) -> usize {
@@ -44,13 +54,15 @@ impl BomWriter {
         let max_per_node = ((block_size as usize) - 12) / 8;
 
         if entries.is_empty() {
-            let mut node = Vec::with_capacity(12);
+            let mut node = Vec::with_capacity(block_size as usize);
             node.write_u16::<BigEndian>(1).unwrap();
             node.write_u16::<BigEndian>(0).unwrap();
             node.write_i32::<BigEndian>(0).unwrap();
             node.write_u32::<BigEndian>(0).unwrap();
+            node.resize(block_size as usize, 0);
             let node_idx = self.add_block(node);
-            let tree_hdr = build_tree_header(node_idx, block_size, 0, 0);
+            let tree_hdr =
+                build_tree_header(node_idx, block_size, 0, 0, self.tree_key_size());
             let tree_idx = self.add_block(tree_hdr);
             self.named_blocks.insert(name.to_string(), tree_idx);
             return tree_idx;
@@ -62,8 +74,13 @@ impl BomWriter {
         if leaf_batches.len() == 1 {
             let node = self.build_leaf_node(leaf_batches[0], 0, 0, block_size);
             let node_idx = self.add_block(node);
-            let tree_hdr =
-                build_tree_header(node_idx, block_size, entries.len() as u32, 0);
+            let tree_hdr = build_tree_header(
+                node_idx,
+                block_size,
+                entries.len() as u32,
+                0,
+                self.tree_key_size(),
+            );
             let tree_idx = self.add_block(tree_hdr);
             self.named_blocks.insert(name.to_string(), tree_idx);
             return tree_idx;
@@ -105,11 +122,23 @@ impl BomWriter {
                 .unwrap();
         }
         let internal_idx = self.add_block(internal);
-        let tree_hdr =
-            build_tree_header(internal_idx, block_size, entries.len() as u32, 0);
+        let tree_hdr = build_tree_header(
+            internal_idx,
+            block_size,
+            entries.len() as u32,
+            0,
+            self.tree_key_size(),
+        );
         let tree_idx = self.add_block(tree_hdr);
         self.named_blocks.insert(name.to_string(), tree_idx);
         tree_idx
+    }
+
+    fn tree_key_size(&self) -> u32 {
+        match self.inline_key_size {
+            Some(n) => n as u32,
+            None => 0xFFFFFFFF,
+        }
     }
 
     fn build_leaf_node(
@@ -124,19 +153,21 @@ impl BomWriter {
         node.write_u16::<BigEndian>(entries.len() as u16).unwrap();
         node.write_u32::<BigEndian>(forward).unwrap();
         node.write_u32::<BigEndian>(backward).unwrap();
-        let mut key_data_list: Vec<Vec<u8>> = Vec::new();
         for (key_data, value_data) in entries {
             let val_idx = self.add_block(value_data.clone());
             let key_idx = self.add_block(key_data.clone());
             node.write_u32::<BigEndian>(val_idx as u32).unwrap();
             node.write_u32::<BigEndian>(key_idx as u32).unwrap();
-            key_data_list.push(key_data.clone());
         }
         if (node.len() as u32) < block_size {
             node.resize(block_size as usize, 0);
         }
-        for kd in key_data_list {
-            node.extend_from_slice(&kd);
+        // Apple reserves trailing zeros of size n_entries * fixed_key_size for
+        // trees whose keys are all the same size (e.g. RENDITIONS, where the
+        // key is a rendition-key tuple sized by KEYFORMAT). Variable-key trees
+        // (FACETKEYS, APPEARANCEKEYS) leave the leaf at exactly block_size.
+        if let Some(ks) = self.inline_key_size {
+            node.resize(node.len() + entries.len() * ks, 0);
         }
         node
     }
@@ -148,7 +179,17 @@ impl BomWriter {
         block_size: u32,
     ) -> usize {
         if entries.is_empty() {
-            return self.add_tree(name, &[], block_size);
+            let mut node = Vec::with_capacity(block_size as usize);
+            node.write_u16::<BigEndian>(1).unwrap();
+            node.write_u16::<BigEndian>(0).unwrap();
+            node.write_u32::<BigEndian>(0).unwrap();
+            node.write_u32::<BigEndian>(0).unwrap();
+            node.resize(block_size as usize, 0);
+            let node_idx = self.add_block(node);
+            let tree_hdr = build_tree_header(node_idx, block_size, 0, 1, 0);
+            let tree_idx = self.add_block(tree_hdr);
+            self.named_blocks.insert(name.to_string(), tree_idx);
+            return tree_idx;
         }
 
         let max_per_node = ((block_size as usize) - 12) / 8;
@@ -171,7 +212,7 @@ impl BomWriter {
             }
             let node_idx = self.add_block(node);
             let tree_hdr =
-                build_tree_header(node_idx, block_size, entries.len() as u32, 1);
+                build_tree_header(node_idx, block_size, entries.len() as u32, 1, 0);
             let tree_idx = self.add_block(tree_hdr);
             self.named_blocks.insert(name.to_string(), tree_idx);
             return tree_idx;
@@ -222,7 +263,7 @@ impl BomWriter {
         }
         let internal_idx = self.add_block(internal);
         let tree_hdr =
-            build_tree_header(internal_idx, block_size, entries.len() as u32, 1);
+            build_tree_header(internal_idx, block_size, entries.len() as u32, 1, 0);
         let tree_idx = self.add_block(tree_hdr);
         self.named_blocks.insert(name.to_string(), tree_idx);
         tree_idx
@@ -339,8 +380,18 @@ impl Default for BomWriter {
     }
 }
 
-fn build_tree_header(root_idx: usize, block_size: u32, n_paths: u32, flag: u8) -> Vec<u8> {
-    // "tree"(4) + version(4) + root(4) + block_size(4) + n_paths(4) + flag(1) + pad(8)
+fn build_tree_header(
+    root_idx: usize,
+    block_size: u32,
+    n_paths: u32,
+    flag: u8,
+    key_size: u32,
+) -> Vec<u8> {
+    // "tree"(4) + version(4) + root(4) + block_size(4) + n_paths(4) +
+    // flag(1) + key_size(4) + pad(4).
+    // key_size is the per-entry inline key length: the actual size for
+    // fixed-key trees (RENDITIONS), 0xFFFFFFFF for variable-key trees
+    // (FACETKEYS, APPEARANCEKEYS), or 0 for raw-key trees (BITMAPKEYS).
     let mut hdr = Vec::new();
     hdr.extend_from_slice(b"tree");
     hdr.write_u32::<BigEndian>(1).unwrap();
@@ -348,7 +399,7 @@ fn build_tree_header(root_idx: usize, block_size: u32, n_paths: u32, flag: u8) -
     hdr.write_u32::<BigEndian>(block_size).unwrap();
     hdr.write_u32::<BigEndian>(n_paths).unwrap();
     hdr.write_u8(flag).unwrap();
-    hdr.write_u32::<BigEndian>(0).unwrap();
+    hdr.write_u32::<BigEndian>(key_size).unwrap();
     hdr.write_u32::<BigEndian>(0).unwrap();
     hdr
 }

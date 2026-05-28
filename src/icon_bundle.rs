@@ -268,8 +268,10 @@ fn write_icon_car(
         car::make_facetkey_value(car::ELEMENT_UNIVERSAL, Some(car::PART_ICON), ident),
     )];
     bom.add_tree("FACETKEYS", &facetkey_entries, 4096);
+    bom.set_inline_key_size(Some(keyformat.len() * 2));
     bom.add_tree("RENDITIONS", all_entries, 4096);
-    bom.add_tree("BITMAPKEYS", &[], 1024);
+    bom.set_inline_key_size(None);
+    bom.add_raw_key_tree("BITMAPKEYS", &[], 1024);
     bom.write(car_path)?;
     Ok(())
 }
