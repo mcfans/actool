@@ -313,7 +313,10 @@ fn build_icon_car(
     min_deploy: &str,
 ) -> Result<()> {
     let ident = hash_name(icon_name);
-    let keyformat: Vec<u16> = car::KEYFORMAT_ALL.to_vec();
+    // The actual keyformat is computed from the renditions below — only the
+    // attributes they exercise survive. .icon catalogs typically end up with
+    // [7, 13, 1, 2, 3, 17, 9, 11, 12] (no direction, no dim1).
+    let placeholder_kf: Vec<u16> = Vec::new();
     let mut renditions: Vec<Rendition> = Vec::new();
 
     for (img_path, pixel_size, scale) in icon_images {
@@ -338,7 +341,7 @@ fn build_icon_car(
             pixel_format: pf,
             layout: car::LAYOUT_ONE_PART_SCALE,
             dim2,
-            keyformat: keyformat.clone(),
+            keyformat: placeholder_kf.clone(),
             min_deploy: min_deploy.to_string(),
             platform: platform.to_string(),
             colorspace_id: car::colorspace_for_pixel_format(&pf),
@@ -359,7 +362,7 @@ fn build_icon_car(
         }
     }
     let mut ms_rend = car::build_multisize_rendition(icon_name, ident, &ms_entries);
-    ms_rend.keyformat = keyformat.clone();
+    ms_rend.keyformat = placeholder_kf.clone();
     renditions.push(ms_rend);
 
     let mut facets: Vec<FacetEntry> = vec![(
@@ -387,7 +390,7 @@ fn build_icon_car(
             pixel_data: pd,
             pixel_format: pf,
             layout: car::LAYOUT_ONE_PART_SCALE,
-            keyformat: keyformat.clone(),
+            keyformat: placeholder_kf.clone(),
             min_deploy: min_deploy.to_string(),
             platform: platform.to_string(),
             colorspace_id: car::colorspace_for_pixel_format(&pf),
@@ -399,6 +402,11 @@ fn build_icon_car(
             Some(car::PART_REGULAR),
             asset_ident,
         ));
+    }
+
+    let keyformat = car::compute_keyformat(&renditions, false);
+    for rend in &mut renditions {
+        rend.keyformat = keyformat.clone();
     }
 
     let mut all_entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
