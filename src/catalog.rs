@@ -773,6 +773,10 @@ impl AssetCatalog {
                 });
             }
         }
+        // Apple's multisize entries are listed in ascending point-size
+        // order. Our discovery order is filesystem-defined (which sorts
+        // strings lexically, so "128" < "16"), so reorder by width.
+        ms_entries.sort_by_key(|e| e.width);
         let ms_rend = car::build_multisize_rendition(&name, ident, &ms_entries);
         renditions.push(ms_rend);
 
@@ -858,6 +862,10 @@ impl AssetCatalog {
                 });
             }
         }
+        // Match Apple's ascending point-size order — read_dir + sort()
+        // above lists "icon_128x128.png" before "icon_16x16.png" because
+        // the comparison is lexical.
+        ms_entries.sort_by_key(|e| e.width);
         let ms_rend = car::build_multisize_rendition(&name, ident, &ms_entries);
         renditions.push(ms_rend);
 
