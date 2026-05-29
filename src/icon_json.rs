@@ -94,12 +94,35 @@ pub struct Translucency {
     pub value: Option<f32>,
 }
 
+/// `supported-platforms` can list explicit platform names OR the keyword
+/// "shared" — both are valid icon.json (the second appears in
+/// KeepingYouAwake's AppIcon.icon and tagspaces's icon.icon).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum PlatformList {
+    Shared(String),
+    Explicit(Vec<String>),
+}
+
+impl PlatformList {
+    pub fn as_slice(&self) -> &[String] {
+        match self {
+            PlatformList::Shared(_) => &[],
+            PlatformList::Explicit(v) => v,
+        }
+    }
+
+    pub fn is_shared(&self) -> bool {
+        matches!(self, PlatformList::Shared(s) if s == "shared")
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct SupportedPlatforms {
     #[serde(default)]
-    pub squares: Vec<String>,
+    pub squares: Option<PlatformList>,
     #[serde(default)]
-    pub circles: Option<Vec<String>>,
+    pub circles: Option<PlatformList>,
 }
 
 impl IconJson {
@@ -148,7 +171,24 @@ mod tests {
         assert_eq!(j.groups[0].layers[0].glass, Some(false));
         assert_eq!(j.groups[0].shadow.as_ref().unwrap().kind, "none");
         let sp = j.supported_platforms.unwrap();
-        assert_eq!(sp.squares, vec!["macOS"]);
+        assert_eq!(sp.squares.unwrap().as_slice(), &["macOS".to_string()]);
+    }
+
+    #[test]
+    fn parses_supported_platforms_shared_string() {
+        // KeepingYouAwake's AppIcon.icon and tagspaces' icon.icon use the
+        // keyword "shared" instead of an explicit platform list.
+        let s = r#"{
+            "groups": [],
+            "supported-platforms": {"squares": "shared", "circles": ["watchOS"]}
+        }"#;
+        let j = IconJson::parse(s).unwrap();
+        let sp = j.supported_platforms.unwrap();
+        let sq = sp.squares.unwrap();
+        assert!(sq.is_shared());
+        assert!(sq.as_slice().is_empty());
+        let circ = sp.circles.unwrap();
+        assert_eq!(circ.as_slice(), &["watchOS".to_string()]);
     }
 
     #[test]
