@@ -143,9 +143,6 @@ pub fn compile_icon_bundle(
     if source_images.is_empty() {
         return Ok(Vec::new());
     }
-    let has_svg = source_images
-        .iter()
-        .any(|p| p.to_string_lossy().to_lowercase().ends_with(".svg"));
     let facet_prefix = bundle_facet_prefix(icon_path);
     let layer_assets = collect_layer_assets(icon_path, &parsed, &facet_prefix);
     // Apple emits a `<stem>/<group_name>` facet for every group even when
@@ -165,15 +162,48 @@ pub fn compile_icon_bundle(
 
     let mut output_files: Vec<PathBuf> = Vec::new();
 
-    if has_svg {
-        let car_path = output_dir.join("Assets.car");
-        build_svg_icon_car(&car_path, &icon_name, &source_images, platform, min_deploy)?;
-        output_files.push(fs::canonicalize(&car_path).unwrap_or(car_path));
+    // Route both PNG- and SVG-source `.icon` bundles through the same
+    // IconComposer emit path. SVG layers are rasterized to PNGs in a
+    // temp dir at 1024x1024 (full size for the layer asset) and at each
+    // MACOS_ICON_SIZE (for the multisize + atlas pipeline).
+    let tmpdir = std::env::temp_dir().join(format!("actool_icon_{}", std::process::id()));
+    fs::create_dir_all(&tmpdir)?;
+    let primary_source = &source_images[0];
+    let primary_is_svg = primary_source
+        .to_string_lossy()
+        .to_lowercase()
+        .ends_with(".svg");
+
+    // (filepath, pixel_size, scale) — fed to build_icon_car
+    let mut icon_images: Vec<(PathBuf, u32, u32)> = Vec::new();
+    if primary_is_svg {
+        let svg_data = fs::read(primary_source)?;
+        let (sw, sh) = crate::svg_raster::parse_svg_dimensions(&svg_data);
+        if sw == 0 || sh == 0 {
+            anyhow::bail!(
+                "could not determine intrinsic size of {}",
+                primary_source.display()
+            );
+        }
+        for (point_size, scale) in MACOS_ICON_SIZES {
+            let pixel_size = point_size * scale;
+            let bgra =
+                crate::svg_raster::rasterize_svg(&svg_data, *point_size, *point_size, *scale)?;
+            let pixel_pf = b"BGRA";
+            let mut rgba = bgra.clone();
+            for px in rgba.chunks_exact_mut(4) {
+                px.swap(0, 2);
+            }
+            let img = image::RgbaImage::from_raw(pixel_size, pixel_size, rgba)
+                .ok_or_else(|| anyhow::anyhow!("svg rasterization size mismatch"))?;
+            let filename = format!("Icon{pixel_size}x{pixel_size}.png");
+            let filepath = tmpdir.join(&filename);
+            img.save(&filepath)?;
+            icon_images.push((filepath, pixel_size, *scale));
+            let _ = pixel_pf;
+        }
     } else {
-        let src_img = image::open(&source_images[0])?.to_rgba8();
-        let tmpdir = std::env::temp_dir().join(format!("actool_icon_{}", std::process::id()));
-        fs::create_dir_all(&tmpdir)?;
-        let mut icon_images: Vec<(PathBuf, u32, u32)> = Vec::new();
+        let src_img = image::open(primary_source)?.to_rgba8();
         for (point_size, scale) in MACOS_ICON_SIZES {
             let pixel_size = point_size * scale;
             let resized = image::imageops::resize(
@@ -187,35 +217,39 @@ pub fn compile_icon_bundle(
             resized.save(&filepath)?;
             icon_images.push((filepath, pixel_size, *scale));
         }
-        let car_path = output_dir.join("Assets.car");
-        build_icon_car(
-            &car_path,
-            &facet_prefix,
-            &icon_images,
-            &layer_assets,
-            &group_facet_names,
-            &color_assets,
-            &gradient_assets,
-            platform,
-            min_deploy,
-        )?;
-        output_files.push(fs::canonicalize(&car_path).unwrap_or(car_path));
-
-        // Apple emits an `.icns` alongside the catalog when the .icon
-        // bundle is "shared" across legacy targets. Bundles that opt into
-        // a modern explicit platform list (e.g. `squares: ["macOS"]`)
-        // skip the icns. See tests on element-web (no icns), KYA / tagspaces
-        // (icns emitted) for the empirical rule.
-        if needs_standalone_icns(&parsed) && standalone_icon_behavior != "none" {
-            let icns_path = output_dir.join(format!("{icon_name}.icns"));
-            crate::icns::create_icns(&icon_images, &icns_path)?;
-            if icns_path.exists() {
-                output_files.push(fs::canonicalize(&icns_path).unwrap_or(icns_path));
-            }
-        }
-
-        let _ = fs::remove_dir_all(&tmpdir);
     }
+
+    // SVG layer assets get rasterized to a tmp PNG at their intrinsic
+    // size (or 1024x1024 fallback) so the existing build_icon_car path
+    // can use load_image_as_bgra unchanged.
+    let layer_assets = materialize_svg_layer_assets(layer_assets, &tmpdir)?;
+
+    let car_path = output_dir.join("Assets.car");
+    build_icon_car(
+        &car_path,
+        &facet_prefix,
+        &icon_images,
+        &layer_assets,
+        &group_facet_names,
+        &color_assets,
+        &gradient_assets,
+        platform,
+        min_deploy,
+    )?;
+    output_files.push(fs::canonicalize(&car_path).unwrap_or(car_path));
+
+    // Apple emits an `.icns` alongside the catalog when the .icon bundle
+    // is "shared" with legacy targets; bundles that declare an explicit
+    // modern platform list (e.g. `squares: ["macOS"]`) skip the icns.
+    if needs_standalone_icns(&parsed) && standalone_icon_behavior != "none" {
+        let icns_path = output_dir.join(format!("{icon_name}.icns"));
+        crate::icns::create_icns(&icon_images, &icns_path)?;
+        if icns_path.exists() {
+            output_files.push(fs::canonicalize(&icns_path).unwrap_or(icns_path));
+        }
+    }
+
+    let _ = fs::remove_dir_all(&tmpdir);
     let _ = accent_color;
 
     // Apple writes an EMPTY plist (`<dict/>`) for .icon bundles; the
@@ -243,13 +277,9 @@ fn collect_layer_assets(
         let Some(image_name) = layer.image_name.as_deref() else {
             continue;
         };
-        let Some(layer_name) = layer.name.as_deref() else {
-            continue;
-        };
-        // Skip SVGs here; the .icon SVG path emits them via build_svg_icon_car.
-        if image_name.to_lowercase().ends_with(".svg") {
-            continue;
-        }
+        // Both SVG and raster source layers flow through the same path.
+        // SVG layers are rasterized to PNG via materialize_svg_layer_assets
+        // before they reach load_image_as_bgra.
         let assets_path = bundle.join("Assets").join(image_name);
         let resolved = if assets_path.exists() {
             assets_path
@@ -260,7 +290,15 @@ fn collect_layer_assets(
             }
             root_path
         };
-        let facet_name = format!("{facet_prefix}_Assets/{layer_name}");
+        // Apple names the asset facet after the image-file stem (no
+        // extension), not the layer's `name` field. Verified against
+        // element-web (element.png → "element"), tagspaces (Image 2.png
+        // → "Image 2") and KYA (AppIcon.svg → "AppIcon", layer.name = "Logo").
+        let stem = std::path::Path::new(image_name)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(image_name);
+        let facet_name = format!("{facet_prefix}_Assets/{stem}");
         if !seen.insert(facet_name.clone()) {
             continue;
         }
@@ -302,49 +340,44 @@ fn find_all_source_images(bundle: &Path, json: &serde_json::Value) -> Vec<PathBu
     out
 }
 
-fn build_svg_icon_car(
-    car_path: &Path,
-    icon_name: &str,
-    svg_paths: &[PathBuf],
-    platform: &str,
-    min_deploy: &str,
-) -> Result<()> {
-    let ident = hash_name(icon_name);
-    let keyformat: Vec<u16> = car::KEYFORMAT_ALL.to_vec();
-
-    let mut all_entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-    for (layer_idx, svg_path) in svg_paths.iter().enumerate() {
-        let filename = svg_path.file_name().unwrap_or_default().to_string_lossy().to_string();
-        let svg_data = fs::read(svg_path)?;
-        let csi = car::build_svg_csi(&filename, &svg_data);
-        let mut rend = Rendition {
-            name: filename.clone(),
-            identifier: ident,
-            element: car::ELEMENT_UNIVERSAL,
-            part: car::PART_ICON,
-            scale: 1,
-            dim2: (layer_idx as u16) + 1,
-            layout: car::LAYOUT_PDF,
-            pixel_format: *car::PIXELFMT_SVG,
-            keyformat: keyformat.clone(),
-            min_deploy: min_deploy.to_string(),
-            platform: platform.to_string(),
-            ..Rendition::default()
-        };
-        rend.csi_override = Some(csi);
-        let key = rend.build_rendition_key();
-        let csi = rend.build_csi();
-        all_entries.push((key, csi));
+/// For every SVG-source layer asset, rasterize to a PNG in `tmpdir` and
+/// return a copy of the LayerAsset pointing at the PNG. PNG-source layers
+/// are passed through unchanged. Used to converge the SVG-source and
+/// PNG-source `.icon` paths on a single IconComposer emit pipeline.
+fn materialize_svg_layer_assets(
+    layer_assets: Vec<LayerAsset>,
+    tmpdir: &Path,
+) -> Result<Vec<LayerAsset>> {
+    let mut out = Vec::with_capacity(layer_assets.len());
+    for asset in layer_assets {
+        let lower = asset.source_path.to_string_lossy().to_lowercase();
+        if !lower.ends_with(".svg") {
+            out.push(asset);
+            continue;
+        }
+        let svg_data = fs::read(&asset.source_path)?;
+        let (sw, sh) = crate::svg_raster::parse_svg_dimensions(&svg_data);
+        let (w, h) = if sw > 0 && sh > 0 { (sw, sh) } else { (1024, 1024) };
+        let bgra = crate::svg_raster::rasterize_svg(&svg_data, w, h, 1)?;
+        let mut rgba = bgra;
+        for px in rgba.chunks_exact_mut(4) {
+            px.swap(0, 2);
+        }
+        let img = image::RgbaImage::from_raw(w, h, rgba)
+            .ok_or_else(|| anyhow::anyhow!("svg rasterization size mismatch"))?;
+        let stem = asset
+            .source_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("layer");
+        let png_path = tmpdir.join(format!("layer_{stem}.png"));
+        img.save(&png_path)?;
+        out.push(LayerAsset {
+            facet_name: asset.facet_name,
+            source_path: png_path,
+        });
     }
-    all_entries.sort_by(|a, b| a.0.cmp(&b.0));
-
-    let facets = vec![(
-        icon_name.to_string(),
-        car::ELEMENT_UNIVERSAL,
-        Some(car::PART_ICON),
-        ident,
-    )];
-    write_icon_car(car_path, &facets, &keyformat, &all_entries, platform, min_deploy)
+    Ok(out)
 }
 
 #[allow(clippy::too_many_arguments)]
