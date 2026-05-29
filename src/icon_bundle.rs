@@ -3,7 +3,6 @@
 use crate::bom::BomWriter;
 use crate::car::{self, MultisizeImageEntry, Rendition};
 use crate::catalog::load_image_as_bgra;
-use crate::icns;
 use crate::icon_json::{Fill, IconJson, PlatformList};
 use crate::name_hash::hash_name;
 use byteorder::LittleEndian;
