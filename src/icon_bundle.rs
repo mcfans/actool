@@ -1225,16 +1225,22 @@ fn fill_assets(
 }
 
 /// Whether Apple's actool emits a standalone `.icns` alongside the catalog.
-/// Empirically observed across 3 fixtures:
-///   element-web  `squares: ["macOS"]`  → NO icns
-///   KYA          `squares: "shared"`   → emits AppIcon.icns
-///   tagspaces    `squares: "shared"`   → emits icon.icns
-/// The rule appears to be: skip icns when an explicit modern platform list
-/// is given; emit when the bundle is "shared" with legacy targets or no
-/// platform constraint is declared.
+/// Empirically observed across all known fixtures:
+///   element-web        `squares: ["macOS"]`         → NO icns
+///   scrumdinger        `squares: ["iOS", "macOS"]`  → emits icns
+///   KYA/ts/ding/ch/rsa `squares: "shared"`          → emits icns
+///   (absent)                                        → emits icns
+///
+/// Refined rule: skip icns ONLY when squares is an explicit list whose
+/// only entry is "macOS" — i.e. a pure modern-Mac bundle. Any list that
+/// includes a non-macOS legacy target (iOS, watchOS, …), the "shared"
+/// keyword, or no constraint at all triggers icns emission.
 fn needs_standalone_icns(parsed: &IconJson) -> bool {
     match parsed.supported_platforms.as_ref().and_then(|sp| sp.squares.as_ref()) {
-        Some(PlatformList::Explicit(_)) => false,
+        Some(PlatformList::Explicit(list)) => {
+            // Mac-only explicit list → no icns. Any other entry forces it.
+            !list.iter().all(|p| p == "macOS")
+        }
         Some(PlatformList::Shared(_)) => true,
         None => true,
     }

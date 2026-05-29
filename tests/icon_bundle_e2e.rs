@@ -203,11 +203,18 @@ fn build_icon_bundle(
     }
     let _ = group_name_field; // keep helper hint visible
 
-    let icon_json = serde_json::json!({
+    let mut icon_json = serde_json::json!({
         "fill": fill_value,
         "groups": [group],
-        "supported-platforms": supported_platforms,
     });
+    // Treat Value::Null as "omit the supported-platforms field entirely"
+    // so tests can exercise the absent-key path.
+    if !supported_platforms.is_null() {
+        icon_json
+            .as_object_mut()
+            .unwrap()
+            .insert("supported-platforms".to_string(), supported_platforms);
+    }
     fs::write(
         bundle.join("icon.json"),
         serde_json::to_string_pretty(&icon_json).unwrap(),
@@ -534,12 +541,23 @@ fn svg_source_bundle_does_not_emit_legacy_pdf_only_catalog() {
 }
 
 #[test]
-fn shared_platforms_emits_icns_explicit_does_not() {
-    // Direct functional check of the icns gate.
+fn icns_gate_matches_apple_across_supported_platforms_shapes() {
+    // Apple's icns emission rule, verified empirically across all
+    // checked-in third_party fixtures (element-web, KYA, tagspaces,
+    // ding, classhub, recipe-scraper-app, scrumdinger): icns is
+    // skipped ONLY when `squares` is an explicit list whose entries
+    // are all "macOS". Everything else — "shared", non-Mac targets in
+    // the list, an absent `supported-platforms` key — emits icns.
     let parent = tempdir();
     for (label, supported, expect_icns) in [
-        ("explicit", serde_json::json!({"squares": ["macOS"]}), false),
+        // The element-web shape — modern Mac-only.
+        ("mac_only", serde_json::json!({"squares": ["macOS"]}), false),
+        // The scrumdinger shape — includes iOS, so icns emitted.
+        ("multi_platform", serde_json::json!({"squares": ["iOS", "macOS"]}), true),
+        // The KYA/tagspaces/ding/classhub/recipe-scraper shape.
         ("shared", serde_json::json!({"squares": "shared"}), true),
+        // Defensive: supported-platforms absent → emit icns.
+        ("absent", serde_json::Value::Null, true),
     ] {
         let bundle = build_icon_bundle(
             parent.path(),
