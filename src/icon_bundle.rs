@@ -543,6 +543,10 @@ fn build_icon_car(
             min_deploy: min_deploy.to_string(),
             platform: platform.to_string(),
             colorspace_id: car::colorspace_for_pixel_format(&pf),
+            // Apple stores layer source images as non-opaque (CELM ver=0)
+            // even when the source image has alpha=255 everywhere, so the
+            // layer composites with alpha against other stack layers.
+            force_non_opaque: true,
             ..Rendition::default()
         });
         facets.push((

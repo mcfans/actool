@@ -1240,6 +1240,11 @@ pub struct Rendition {
     pub min_deploy: String,
     pub platform: String,
     pub csi_override: Option<Vec<u8>>,
+    /// Force CELM encoding to ver=0 (non-opaque) regardless of the actual
+    /// pixel alpha. Apple's actool stores .icon layer source images this
+    /// way so they composite with alpha against other stack layers, even
+    /// when the source is fully opaque.
+    pub force_non_opaque: bool,
 }
 
 impl Default for Rendition {
@@ -1270,6 +1275,7 @@ impl Default for Rendition {
             min_deploy: "10.11".to_string(),
             platform: "macosx".to_string(),
             csi_override: None,
+            force_non_opaque: false,
         }
     }
 }
@@ -1384,8 +1390,8 @@ impl Rendition {
                 }
             }
 
-            let opaque =
-                check_opaque(&self.pixel_data, &self.pixel_format, self.width, self.height);
+            let opaque = !self.force_non_opaque
+                && check_opaque(&self.pixel_data, &self.pixel_format, self.width, self.height);
             rend_data = compress_data(
                 &pixel_data,
                 &self.pixel_format,
