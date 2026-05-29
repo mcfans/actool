@@ -79,26 +79,31 @@ fn pre_rendered_name(
     )
 }
 
+/// Sizes Apple's actool emits for `.icon` bundles: one rendition per point
+/// size, all @2x except the 1024pt slot which is @1x. The 16/32/64 slots
+/// get bundled into a packed atlas; the rest are stored inline.
 const MACOS_ICON_SIZES: &[(u32, u32)] = &[
-    (16, 1),
     (16, 2),
-    (32, 1),
     (32, 2),
-    (128, 1),
+    (64, 2),
     (128, 2),
-    (256, 1),
     (256, 2),
-    (512, 1),
     (512, 2),
+    (1024, 1),
 ];
+
+/// Point sizes Apple atlases into ZZZZPackedAsset; the rest are inline.
+const ATLAS_POINT_SIZES: &[u32] = &[16, 32, 64];
 
 fn icon_dim2(point_size: u32) -> u16 {
     match point_size {
         16 => 1,
         32 => 2,
-        128 => 3,
-        256 => 4,
-        512 => 5,
+        64 => 3,
+        128 => 4,
+        256 => 5,
+        512 => 6,
+        1024 => 7,
         _ => 0,
     }
 }
@@ -345,6 +350,10 @@ fn build_icon_car(
     let placeholder_kf: Vec<u16> = Vec::new();
     let mut renditions: Vec<Rendition> = Vec::new();
 
+    // Split images into atlas candidates (small sizes) and inline (large).
+    // For each size load BGRA pixels, then dispatch by point size.
+    let mut packed_imgs: Vec<crate::packer::PackedImage> = Vec::new();
+    let mut packed_meta: Vec<(String, u32, u32, u32, u16)> = Vec::new();
     for (img_path, pixel_size, scale) in icon_images {
         let (pd, w, h, pf) = load_image_as_bgra(img_path, false)?;
         let point_size = pixel_size / scale;
@@ -355,24 +364,120 @@ fn build_icon_car(
             *scale,
             "NSAppearanceNameSystem",
         );
-        renditions.push(Rendition {
-            name,
-            identifier: ident,
-            element: car::ELEMENT_UNIVERSAL,
-            part: car::PART_ICON,
-            scale: *scale as u16,
-            width: w,
-            height: h,
-            pixel_data: pd,
-            pixel_format: pf,
-            layout: car::LAYOUT_ONE_PART_SCALE,
-            dim2,
-            keyformat: placeholder_kf.clone(),
-            min_deploy: min_deploy.to_string(),
-            platform: platform.to_string(),
-            colorspace_id: car::colorspace_for_pixel_format(&pf),
-            ..Rendition::default()
-        });
+        if ATLAS_POINT_SIZES.contains(&point_size) {
+            let mut pi = crate::packer::PackedImage::new(
+                name.clone(),
+                ident as u32,
+                w,
+                h,
+            );
+            pi.pixel_data = pd;
+            pi.pixel_format = pf;
+            pi.scale = *scale;
+            pi.part = car::PART_ICON as u32;
+            pi.dim2 = dim2 as u32;
+            packed_imgs.push(pi);
+            packed_meta.push((name, *pixel_size, *scale, point_size as u32, dim2));
+        } else {
+            renditions.push(Rendition {
+                name,
+                identifier: ident,
+                element: car::ELEMENT_UNIVERSAL,
+                part: car::PART_ICON,
+                scale: *scale as u16,
+                width: w,
+                height: h,
+                pixel_data: pd,
+                pixel_format: pf,
+                layout: car::LAYOUT_ONE_PART_SCALE,
+                dim2,
+                keyformat: placeholder_kf.clone(),
+                min_deploy: min_deploy.to_string(),
+                platform: platform.to_string(),
+                colorspace_id: car::colorspace_for_pixel_format(&pf),
+                ..Rendition::default()
+            });
+        }
+    }
+    drop(packed_meta);
+
+    // Pack 16/32/64 into one ZZZZPackedAsset atlas. Emit a packed_atlas
+    // rendition for the atlas image and one packed_ref rendition per source
+    // image referencing into the atlas via the INLK TLV.
+    if !packed_imgs.is_empty() {
+        let pf = packed_imgs[0].pixel_format;
+        let mut atlases = crate::packer::pack_images_split(packed_imgs, 262, 196);
+        for atlas in &mut atlases {
+            atlas.render();
+            let atlas_name = atlas.name();
+            // Apple uses LZFSE (not deepmap2) for atlases whose images are
+            // all icons in BGRA — both conditions hold here.
+            let force_lzfse = &pf == b"BGRA";
+            let atlas_csi = car::build_packed_asset_csi(
+                &atlas_name,
+                atlas.width,
+                atlas.height,
+                2,
+                &pf,
+                &atlas.pixel_data,
+                min_deploy,
+                platform,
+                force_lzfse,
+            );
+            renditions.push(Rendition {
+                name: atlas_name.clone(),
+                identifier: 0,
+                element: car::ELEMENT_PACKED,
+                part: car::PART_REGULAR,
+                scale: 2,
+                width: atlas.width,
+                height: atlas.height,
+                pixel_data: Vec::new(),
+                pixel_format: pf,
+                layout: car::LAYOUT_NAME_LIST,
+                keyformat: placeholder_kf.clone(),
+                min_deploy: min_deploy.to_string(),
+                platform: platform.to_string(),
+                colorspace_id: car::colorspace_for_pixel_format(&pf),
+                csi_override: Some(atlas_csi),
+                ..Rendition::default()
+            });
+
+            for img in &atlas.images {
+                let inlk_y = atlas.height - img.y - img.height;
+                let ref_csi = car::build_packed_image_csi(
+                    &img.name,
+                    img.width,
+                    img.height,
+                    img.scale as u16,
+                    &pf,
+                    img.x,
+                    inlk_y,
+                    0,
+                    0,
+                    0,
+                );
+                renditions.push(Rendition {
+                    name: img.name.clone(),
+                    identifier: ident,
+                    element: car::ELEMENT_UNIVERSAL,
+                    part: car::PART_ICON,
+                    scale: img.scale as u16,
+                    dim2: img.dim2 as u16,
+                    width: img.width,
+                    height: img.height,
+                    pixel_data: Vec::new(),
+                    pixel_format: pf,
+                    layout: car::LAYOUT_PACKED_IMAGE,
+                    keyformat: placeholder_kf.clone(),
+                    min_deploy: min_deploy.to_string(),
+                    platform: platform.to_string(),
+                    colorspace_id: car::colorspace_for_pixel_format(&pf),
+                    csi_override: Some(ref_csi),
+                    ..Rendition::default()
+                });
+            }
+        }
     }
 
     let mut ms_entries: Vec<MultisizeImageEntry> = Vec::new();
