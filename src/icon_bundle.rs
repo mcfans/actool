@@ -159,11 +159,9 @@ pub fn compile_icon_bundle(
             format!("{facet_prefix}/{n}")
         })
         .collect();
-    let (color_assets, gradient_assets) = if fill_is_automatic(parsed.fill.as_ref()) {
-        automatic_fill_assets(&facet_prefix)
-    } else {
-        (Vec::new(), Vec::new())
-    };
+    let (color_assets, gradient_assets) =
+        fill_assets(&facet_prefix, parsed.fill.as_ref())
+            .unwrap_or_else(|| (Vec::new(), Vec::new()));
 
     let mut output_files: Vec<PathBuf> = Vec::new();
 
@@ -833,6 +831,99 @@ fn fill_is_automatic(fill: Option<&Fill>) -> bool {
         Some(Fill::Keyword(k)) => k == "automatic",
         Some(Fill::Structured(_)) => false,
     }
+}
+
+/// A parsed Apple color-spec string like `srgb:0.97288,0.97288,0.97288,1.0`
+/// or `extended-gray:0.84536,1.0`. Returns (colorspace_id, components).
+fn parse_color_spec(spec: &str) -> Option<(u32, Vec<f64>)> {
+    let (name, rest) = spec.split_once(':')?;
+    // Apple rounds color-spec literals to 3 decimal places before promoting
+    // to f32 and storing as f64 — verified empirically: spec "0.97288"
+    // becomes f32(0.973) = 0.9729999…, not f32(0.97288). Mirror that.
+    let comps: Vec<f64> = rest
+        .split(',')
+        .map(|s| {
+            let f: f64 = s.trim().parse().ok()?;
+            let rounded = (f * 1000.0).round() / 1000.0;
+            Some(rounded as f32 as f64)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    // Empirical colorspace ids from Apple's RLOC blobs in /tmp/iconrule_*:
+    //   srgb:r,g,b,a              → cspace=1 (4 components)
+    //   extended-gray:gray,alpha  → cspace=6 (2 components)
+    //   gray:gray,alpha           → cspace=2 (2 components)
+    //   display-p3:r,g,b,a        → cspace=4 (4 components)
+    let cspace = match name {
+        "srgb" => 1,
+        "gray" => 2,
+        "display-p3" => 4,
+        "extended-gray" => 6,
+        _ => return None,
+    };
+    Some((cspace, comps))
+}
+
+/// Apple's palette for a `fill: {"solid": "<spec>"}` icon. Empirically
+/// observed for tagspaces (srgb solid): 4 Colors + 1 Gradient.
+/// Color-1: fixed white anchor (cspace=6)
+/// Color-2: the user-provided color (cspace from spec)
+/// Color-3: 0.192 extended-gray (dark mode mid-gray)
+/// Color-4: 0.078 extended-gray (dark mode bottom)
+/// Gradient-1: Color-3 → Color-4 (linear top-to-bottom, dark mode bg)
+fn solid_fill_assets(
+    facet_prefix: &str,
+    spec: &str,
+) -> Option<(Vec<ColorAsset>, Vec<GradientAsset>)> {
+    let (user_cspace, user_components) = parse_color_spec(spec)?;
+    let n = |s: &str| format!("{facet_prefix}_Assets/{s}");
+    let g = |v: f32| (v as f32) as f64;
+    let colors = vec![
+        ColorAsset {
+            facet_name: n("Color-1"),
+            colorspace_id: 6,
+            components: vec![g(1.0), g(1.0)],
+        },
+        ColorAsset {
+            facet_name: n("Color-2"),
+            colorspace_id: user_cspace,
+            components: user_components,
+        },
+        ColorAsset {
+            facet_name: n("Color-3"),
+            colorspace_id: 2,
+            components: vec![g(0.192), g(1.0)],
+        },
+        ColorAsset {
+            facet_name: n("Color-4"),
+            colorspace_id: 2,
+            components: vec![g(0.078), g(1.0)],
+        },
+    ];
+    let gradients = vec![GradientAsset {
+        facet_name: n("Gradient-1"),
+        geometry: [0.5, 0.0, 0.5, 1.0],
+        stops: vec![(0.0, n("Color-3")), (1.0, n("Color-4"))],
+    }];
+    Some((colors, gradients))
+}
+
+/// Try to derive Color/Gradient assets from an arbitrary fill spec.
+/// Returns None when the spec shape is unrecognized — caller falls back
+/// to no palette and the catalog stays self-consistent.
+fn fill_assets(
+    facet_prefix: &str,
+    fill: Option<&Fill>,
+) -> Option<(Vec<ColorAsset>, Vec<GradientAsset>)> {
+    if fill_is_automatic(fill) {
+        return Some(automatic_fill_assets(facet_prefix));
+    }
+    let Fill::Structured(v) = fill? else {
+        return None;
+    };
+    if let Some(spec) = v.get("solid").and_then(|s| s.as_str()) {
+        return solid_fill_assets(facet_prefix, spec);
+    }
+    None
 }
 
 /// Whether Apple's actool emits a standalone `.icns` alongside the catalog.
