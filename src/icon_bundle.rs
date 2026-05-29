@@ -3,7 +3,6 @@
 use crate::bom::BomWriter;
 use crate::car::{self, MultisizeImageEntry, Rendition};
 use crate::catalog::load_image_as_bgra;
-use crate::icns;
 use crate::icon_json::{Fill, IconJson};
 use crate::name_hash::hash_name;
 use anyhow::Result;
@@ -182,13 +181,6 @@ pub fn compile_icon_bundle(
             resized.save(&filepath)?;
             icon_images.push((filepath, pixel_size, *scale));
         }
-        if standalone_icon_behavior != "none" {
-            let icns_path = output_dir.join(format!("{icon_name}.icns"));
-            icns::create_icns(&icon_images, &icns_path)?;
-            if icns_path.exists() {
-                output_files.push(fs::canonicalize(&icns_path).unwrap_or(icns_path));
-            }
-        }
         let car_path = output_dir.join("Assets.car");
         build_icon_car(
             &car_path,
@@ -204,9 +196,17 @@ pub fn compile_icon_bundle(
         output_files.push(fs::canonicalize(&car_path).unwrap_or(car_path));
         let _ = fs::remove_dir_all(&tmpdir);
     }
+    // For .icon bundles Apple's actool never emits a standalone .icns
+    // regardless of --standalone-icon-behavior (default/all) — the catalog
+    // already encodes every appearance + size.
+    let _ = standalone_icon_behavior;
+    let _ = accent_color;
 
+    // Apple writes an EMPTY plist (`<dict/>`) for .icon bundles; the
+    // CFBundleIconFile/CFBundleIconName fields belong to legacy icon-set
+    // workflows, not the new IconComposer format.
     if let Some(path) = info_plist_path {
-        write_icon_plist(path, &icon_name, accent_color)?;
+        write_empty_partial_plist(path)?;
         output_files.push(fs::canonicalize(path).unwrap_or(path.to_path_buf()));
     }
     Ok(output_files)
@@ -875,29 +875,19 @@ mod tests {
     }
 }
 
-fn write_icon_plist(
-    path: &Path,
-    icon_name: &str,
-    _accent_color: Option<&str>,
-) -> Result<()> {
+fn write_empty_partial_plist(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)?;
         }
     }
-    let lines = vec![
-        r#"<?xml version="1.0" encoding="UTF-8"?>"#.to_string(),
-        r#"<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">"#.to_string(),
-        r#"<plist version="1.0">"#.to_string(),
-        "<dict>".to_string(),
-        "\t<key>CFBundleIconFile</key>".to_string(),
-        format!("\t<string>{icon_name}</string>"),
-        "\t<key>CFBundleIconName</key>".to_string(),
-        format!("\t<string>{icon_name}</string>"),
-        "</dict>".to_string(),
-        "</plist>".to_string(),
-        String::new(),
-    ];
-    fs::write(path, lines.join("\n"))?;
+    let body = concat!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n",
+        "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n",
+        "<plist version=\"1.0\">\n",
+        "<dict/>\n",
+        "</plist>\n",
+    );
+    fs::write(path, body)?;
     Ok(())
 }
