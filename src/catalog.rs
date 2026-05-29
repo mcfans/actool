@@ -430,17 +430,61 @@ impl AssetCatalog {
                     identifier: ident,
                     element: car::ELEMENT_UNIVERSAL,
                     part: car::PART_REGULAR,
-                    scale: 1,
+                    scale: 0,
                     appearance,
                     direction,
                     layout: car::LAYOUT_PDF,
                     pixel_format: *car::PIXELFMT_PDF,
+                    template_rendering_intent: template_intent,
                     min_deploy: self.min_deploy.clone(),
                     platform: self.platform.clone(),
                     ..Rendition::default()
                 };
                 rend.csi_override = Some(csi);
                 renditions.push(rend);
+
+                // Apple's actool emits raster variants of every PDF imageset
+                // at @1x and @2x alongside the original PDF rendition. They
+                // become packed_ref entries via the existing atlas packer.
+                // On non-macOS hosts CoreGraphics isn't available and we
+                // skip this — the catalog stays self-consistent but apps
+                // that ask for the rasterized variant get nothing.
+                for scale in [1u32, 2u32] {
+                    let raster = match crate::pdf_raster::rasterize_pdf(&pdf_data, scale) {
+                        Ok(r) => r,
+                        Err(_) => continue,
+                    };
+                    // Template PDFs are grayscale icons. bgra_to_best_format
+                    // downconverts to ` 8AG` (gray+alpha) when the pixels
+                    // have no chroma — matches Apple's PDF rasterization.
+                    let (pd, pw, ph, pf) = bgra_to_best_format(
+                        raster.bgra,
+                        raster.width,
+                        raster.height,
+                        self.force_bgra,
+                    );
+                    let cs_id = if &pf == b" 8AG" { 2 } else { 1 };
+                    renditions.push(Rendition {
+                        name: filename.to_string(),
+                        identifier: ident,
+                        element: car::ELEMENT_UNIVERSAL,
+                        part: car::PART_REGULAR,
+                        scale: scale as u16,
+                        appearance,
+                        direction,
+                        layout: car::LAYOUT_ONE_PART_SCALE,
+                        pixel_format: pf,
+                        width: pw,
+                        height: ph,
+                        pixel_data: pd,
+                        template_rendering_intent: template_intent,
+                        is_svg_rasterization: true,
+                        colorspace_id: cs_id,
+                        min_deploy: self.min_deploy.clone(),
+                        platform: self.platform.clone(),
+                        ..Rendition::default()
+                    });
+                }
                 continue;
             }
 

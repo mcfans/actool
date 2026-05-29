@@ -132,6 +132,7 @@ pub fn compile_catalog(
                     dim2: r.dim2 as u32,
                     appearance: r.appearance as u32,
                     direction: r.direction as u32,
+                    is_svg_rasterization: r.is_svg_rasterization,
                 }
             })
             .collect();
@@ -201,7 +202,13 @@ pub fn compile_catalog(
                     inlk_y,
                     sprite_atlas_id,
                     dim1_counter,
-                    (img.template_rendering_intent as u32) << 2,
+                    {
+                        let mut f = (img.template_rendering_intent as u32) << 2;
+                        if img.is_svg_rasterization {
+                            f |= 0x04;
+                        }
+                        f
+                    },
                 );
                 all_entries.push((ref_key, ref_csi));
             }

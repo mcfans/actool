@@ -30,6 +30,10 @@ pub struct PackedImage {
     pub dim2: u32,
     pub appearance: u32,
     pub direction: u32,
+    /// True when the source was a vector (SVG / PDF) rasterized into
+    /// pixels. CoreUI sets a CSI flag bit (0x04) for these so the runtime
+    /// knows the rendition originated from a vector mask.
+    pub is_svg_rasterization: bool,
 }
 
 impl PackedImage {
@@ -50,6 +54,7 @@ impl PackedImage {
             dim2: 0,
             appearance: 0,
             direction: 0,
+            is_svg_rasterization: false,
         }
     }
 }

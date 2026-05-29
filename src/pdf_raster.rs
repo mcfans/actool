@@ -1,0 +1,302 @@
+//! PDF rasterization via macOS CoreGraphics.
+//!
+//! Apple's actool at any deployment target since macOS 11 turns each
+//! `.pdf` imageset asset into three renditions: the original PDF
+//! (`LAYOUT_PDF=9`) and rasterized `@1x` + `@2x` packed_ref entries.
+//! We mirror that with the CGPDFDocument APIs from CoreGraphics —
+//! Rust-native PDF renderers won't match Apple's output byte-for-byte
+//! (and we don't want a heavy dependency just for vector icon assets).
+//!
+//! Non-macOS hosts can't link CoreGraphics; on those we print a one-shot
+//! warning per session and skip rasterization. The PDF rendition is
+//! still emitted so the catalog stays self-consistent.
+
+use anyhow::{anyhow, Result};
+use std::ffi::CString;
+use std::os::raw::{c_char, c_double, c_void};
+use std::sync::OnceLock;
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn dlopen(filename: *const c_char, flags: i32) -> *mut c_void;
+    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+}
+
+#[cfg(target_os = "macos")]
+const RTLD_LAZY: i32 = 0x1;
+
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+struct CGPoint {
+    x: c_double,
+    y: c_double,
+}
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+struct CGSize {
+    width: c_double,
+    height: c_double,
+}
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+struct CGRect {
+    origin: CGPoint,
+    size: CGSize,
+}
+
+const K_CG_PDF_MEDIA_BOX: u32 = 0;
+
+type CFDataCreateFn = unsafe extern "C" fn(*const c_void, *const u8, usize) -> *mut c_void;
+type CFReleaseFn = unsafe extern "C" fn(*mut c_void);
+type CGDPCreateWithCFData = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
+type CGDPRelease = unsafe extern "C" fn(*mut c_void);
+type CGPDFDocCreate = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
+type CGPDFDocRelease = unsafe extern "C" fn(*mut c_void);
+type CGPDFDocGetPage = unsafe extern "C" fn(*mut c_void, usize) -> *mut c_void;
+type CGPDFPageGetBoxRect = unsafe extern "C" fn(*mut c_void, u32) -> CGRect;
+type CGColorSpaceCreateFn = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
+type CGColorSpaceRelease = unsafe extern "C" fn(*mut c_void);
+type CGBitmapCreateFn = unsafe extern "C" fn(
+    *mut c_void,
+    usize,
+    usize,
+    usize,
+    usize,
+    *mut c_void,
+    u32,
+) -> *mut c_void;
+type CGBitmapGetDataFn = unsafe extern "C" fn(*mut c_void) -> *mut u8;
+type CGContextScaleFn = unsafe extern "C" fn(*mut c_void, c_double, c_double);
+type CGContextDrawPDFFn = unsafe extern "C" fn(*mut c_void, *mut c_void);
+type CGContextReleaseFn = unsafe extern "C" fn(*mut c_void);
+
+struct PdfSyms {
+    cf_data_create: CFDataCreateFn,
+    cf_release: CFReleaseFn,
+    dp_create: CGDPCreateWithCFData,
+    dp_release: CGDPRelease,
+    doc_create: CGPDFDocCreate,
+    doc_release: CGPDFDocRelease,
+    doc_get_page: CGPDFDocGetPage,
+    page_get_box_rect: CGPDFPageGetBoxRect,
+    cs_create_named: CGColorSpaceCreateFn,
+    cs_release: CGColorSpaceRelease,
+    bitmap_create: CGBitmapCreateFn,
+    bitmap_get_data: CGBitmapGetDataFn,
+    ctx_scale: CGContextScaleFn,
+    ctx_draw_pdf: CGContextDrawPDFFn,
+    ctx_release: CGContextReleaseFn,
+    srgb_name: *mut c_void,
+}
+
+unsafe impl Sync for PdfSyms {}
+unsafe impl Send for PdfSyms {}
+
+#[cfg(target_os = "macos")]
+fn load_syms() -> Option<&'static PdfSyms> {
+    static CELL: OnceLock<Option<PdfSyms>> = OnceLock::new();
+    CELL.get_or_init(|| unsafe {
+        let cg = dlopen(
+            CString::new("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+                .unwrap()
+                .as_ptr(),
+            RTLD_LAZY,
+        );
+        let cf = dlopen(
+            CString::new("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+                .unwrap()
+                .as_ptr(),
+            RTLD_LAZY,
+        );
+        if cg.is_null() || cf.is_null() {
+            return None;
+        }
+        macro_rules! sym {
+            ($handle:expr, $name:expr, $ty:ty) => {{
+                let n = CString::new($name).unwrap();
+                let p = dlsym($handle, n.as_ptr());
+                if p.is_null() {
+                    return None;
+                }
+                std::mem::transmute::<_, $ty>(p)
+            }};
+        }
+        let srgb_name_ptr = {
+            let n = CString::new("kCGColorSpaceSRGB").unwrap();
+            let p = dlsym(cg, n.as_ptr());
+            if p.is_null() {
+                return None;
+            }
+            *(p as *mut *mut c_void)
+        };
+        Some(PdfSyms {
+            cf_data_create: sym!(cf, "CFDataCreate", CFDataCreateFn),
+            cf_release: sym!(cf, "CFRelease", CFReleaseFn),
+            dp_create: sym!(cg, "CGDataProviderCreateWithCFData", CGDPCreateWithCFData),
+            dp_release: sym!(cg, "CGDataProviderRelease", CGDPRelease),
+            doc_create: sym!(cg, "CGPDFDocumentCreateWithProvider", CGPDFDocCreate),
+            doc_release: sym!(cg, "CGPDFDocumentRelease", CGPDFDocRelease),
+            doc_get_page: sym!(cg, "CGPDFDocumentGetPage", CGPDFDocGetPage),
+            page_get_box_rect: sym!(cg, "CGPDFPageGetBoxRect", CGPDFPageGetBoxRect),
+            cs_create_named: sym!(cg, "CGColorSpaceCreateWithName", CGColorSpaceCreateFn),
+            cs_release: sym!(cg, "CGColorSpaceRelease", CGColorSpaceRelease),
+            bitmap_create: sym!(cg, "CGBitmapContextCreate", CGBitmapCreateFn),
+            bitmap_get_data: sym!(cg, "CGBitmapContextGetData", CGBitmapGetDataFn),
+            ctx_scale: sym!(cg, "CGContextScaleCTM", CGContextScaleFn),
+            ctx_draw_pdf: sym!(cg, "CGContextDrawPDFPage", CGContextDrawPDFFn),
+            ctx_release: sym!(cg, "CGContextRelease", CGContextReleaseFn),
+            srgb_name: srgb_name_ptr,
+        })
+    })
+    .as_ref()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn load_syms() -> Option<&'static PdfSyms> {
+    None
+}
+
+static WARNED: OnceLock<()> = OnceLock::new();
+
+fn warn_unavailable_once() {
+    WARNED.get_or_init(|| {
+        eprintln!(
+            "actool: PDF rasterization requires macOS CoreGraphics; skipping \
+             per-scale rasterization. The catalog will still contain the \
+             original PDF rendition but downstream packed_ref entries will \
+             be absent."
+        );
+    });
+}
+
+/// One rasterized variant of a source PDF at a specific scale.
+pub struct RasterizedPdf {
+    pub width: u32,
+    pub height: u32,
+    pub scale: u32,
+    pub bgra: Vec<u8>,
+}
+
+/// Read the natural point dimensions of the first page of a PDF blob.
+/// Returns None if CoreGraphics is unavailable or the PDF can't be parsed.
+pub fn pdf_point_size(pdf_data: &[u8]) -> Option<(u32, u32)> {
+    let syms = load_syms()?;
+    unsafe {
+        let cf = (syms.cf_data_create)(std::ptr::null(), pdf_data.as_ptr(), pdf_data.len());
+        if cf.is_null() {
+            return None;
+        }
+        let dp = (syms.dp_create)(cf);
+        if dp.is_null() {
+            (syms.cf_release)(cf);
+            return None;
+        }
+        let doc = (syms.doc_create)(dp);
+        (syms.dp_release)(dp);
+        (syms.cf_release)(cf);
+        if doc.is_null() {
+            return None;
+        }
+        let page = (syms.doc_get_page)(doc, 1);
+        if page.is_null() {
+            (syms.doc_release)(doc);
+            return None;
+        }
+        let rect = (syms.page_get_box_rect)(page, K_CG_PDF_MEDIA_BOX);
+        (syms.doc_release)(doc);
+        let w = rect.size.width.round() as u32;
+        let h = rect.size.height.round() as u32;
+        if w == 0 || h == 0 {
+            None
+        } else {
+            Some((w, h))
+        }
+    }
+}
+
+/// Rasterize the first page of `pdf_data` at the given integer scale
+/// factor and return premultiplied BGRA pixel rows.
+/// Returns Err on hosts without CoreGraphics or when the PDF can't be
+/// rendered; callers should keep the original PDF rendition either way.
+pub fn rasterize_pdf(pdf_data: &[u8], scale: u32) -> Result<RasterizedPdf> {
+    let syms = match load_syms() {
+        Some(s) => s,
+        None => {
+            warn_unavailable_once();
+            return Err(anyhow!("CoreGraphics PDF support unavailable on this host"));
+        }
+    };
+    let (pt_w, pt_h) =
+        pdf_point_size(pdf_data).ok_or_else(|| anyhow!("could not read PDF page dimensions"))?;
+    let px_w = pt_w * scale;
+    let px_h = pt_h * scale;
+    unsafe {
+        let cf = (syms.cf_data_create)(std::ptr::null(), pdf_data.as_ptr(), pdf_data.len());
+        if cf.is_null() {
+            return Err(anyhow!("CFDataCreate failed"));
+        }
+        let dp = (syms.dp_create)(cf);
+        if dp.is_null() {
+            (syms.cf_release)(cf);
+            return Err(anyhow!("CGDataProviderCreateWithCFData failed"));
+        }
+        let doc = (syms.doc_create)(dp);
+        (syms.dp_release)(dp);
+        (syms.cf_release)(cf);
+        if doc.is_null() {
+            return Err(anyhow!("CGPDFDocumentCreateWithProvider failed"));
+        }
+        let page = (syms.doc_get_page)(doc, 1);
+        if page.is_null() {
+            (syms.doc_release)(doc);
+            return Err(anyhow!("PDF has no first page"));
+        }
+
+        let cs = (syms.cs_create_named)(syms.srgb_name);
+        if cs.is_null() {
+            (syms.doc_release)(doc);
+            return Err(anyhow!("CGColorSpaceCreateWithName failed"));
+        }
+        const K_CG_IMAGE_ALPHA_PREMULTIPLIED_FIRST: u32 = 2;
+        const K_CG_BITMAP_BYTE_ORDER_32_LITTLE: u32 = 2 << 12;
+        let bitmap_info = K_CG_IMAGE_ALPHA_PREMULTIPLIED_FIRST
+            | K_CG_BITMAP_BYTE_ORDER_32_LITTLE;
+        let bpr = (px_w as usize) * 4;
+        let ctx = (syms.bitmap_create)(
+            std::ptr::null_mut(),
+            px_w as usize,
+            px_h as usize,
+            8,
+            bpr,
+            cs,
+            bitmap_info,
+        );
+        if ctx.is_null() {
+            (syms.cs_release)(cs);
+            (syms.doc_release)(doc);
+            return Err(anyhow!("CGBitmapContextCreate failed"));
+        }
+        if scale > 1 {
+            (syms.ctx_scale)(ctx, scale as c_double, scale as c_double);
+        }
+        (syms.ctx_draw_pdf)(ctx, page);
+        let data_ptr = (syms.bitmap_get_data)(ctx);
+        let byte_len = bpr * (px_h as usize);
+        let bgra = std::slice::from_raw_parts(data_ptr, byte_len).to_vec();
+
+        (syms.ctx_release)(ctx);
+        (syms.cs_release)(cs);
+        (syms.doc_release)(doc);
+
+        Ok(RasterizedPdf {
+            width: px_w,
+            height: px_h,
+            scale,
+            bgra,
+        })
+    }
+}
+
+pub fn has_coregraphics_pdf() -> bool {
+    load_syms().is_some()
+}
