@@ -7,6 +7,8 @@ use crate::icns;
 use crate::icon_json::{Fill, IconJson, PlatformList};
 use crate::name_hash::hash_name;
 use byteorder::LittleEndian;
+
+static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 use anyhow::Result;
 use image::imageops::FilterType;
 use std::fs;
@@ -166,7 +168,16 @@ pub fn compile_icon_bundle(
     // IconComposer emit path. SVG layers are rasterized to PNGs in a
     // temp dir at 1024x1024 (full size for the layer asset) and at each
     // MACOS_ICON_SIZE (for the multisize + atlas pipeline).
-    let tmpdir = std::env::temp_dir().join(format!("actool_icon_{}", std::process::id()));
+    // Scratch dir for rasterized PNGs from SVG layers and the per-scale
+    // resized images. Includes a monotonically incrementing counter so
+    // concurrent compiles in the same process (e.g. parallel integration
+    // tests) don't share the same path and tear each other down.
+    let tmp_seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmpdir = std::env::temp_dir().join(format!(
+        "actool_icon_{}_{}",
+        std::process::id(),
+        tmp_seq
+    ));
     fs::create_dir_all(&tmpdir)?;
     let primary_source = &source_images[0];
     let primary_is_svg = primary_source
