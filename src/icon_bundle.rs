@@ -249,6 +249,15 @@ pub fn compile_icon_bundle(
     // can use load_image_as_bgra unchanged.
     let layer_assets = materialize_svg_layer_assets(layer_assets, &tmpdir)?;
 
+    // Top-level fill-specializations triggers Apple's appearance-variant
+    // expansion: a second set of pre-rendered sized renditions + an
+    // alternate atlas keyed on attribute 24 = 1. Verified on scrumdinger.
+    let emit_variant_axis = parsed
+        .fill_specializations
+        .as_ref()
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
+
     let car_path = output_dir.join("Assets.car");
     build_icon_car(
         &car_path,
@@ -258,6 +267,7 @@ pub fn compile_icon_bundle(
         &group_facet_names,
         &color_assets,
         &gradient_assets,
+        emit_variant_axis,
         platform,
         min_deploy,
     )?;
@@ -414,79 +424,95 @@ fn build_icon_car(
     group_facet_names: &[String],
     color_assets: &[ColorAsset],
     gradient_assets: &[GradientAsset],
+    emit_variant_axis: bool,
     platform: &str,
     min_deploy: &str,
 ) -> Result<()> {
     let ident = hash_name(icon_name);
     // The actual keyformat is computed from the renditions below — only the
     // attributes they exercise survive. .icon catalogs typically end up with
-    // [7, 13, 1, 2, 3, 17, 9, 11, 12] (no direction, no dim1).
+    // [7, 13, 1, 2, 3, 17, 9, 11, 12] (no direction, no dim1, no variant).
     let placeholder_kf: Vec<u16> = Vec::new();
     let mut renditions: Vec<Rendition> = Vec::new();
 
+    // Each variant (0 = primary, 1 = alternate) gets its own packed_imgs
+    // list so the packer routes them into separate atlases (the alternate
+    // atlas gets gamut=1 in its name and attribute 24 = 1 in its key).
+    let variants: &[u16] = if emit_variant_axis { &[0u16, 1] } else { &[0u16] };
+    let mut packed_imgs_per_variant: Vec<Vec<crate::packer::PackedImage>> =
+        variants.iter().map(|_| Vec::new()).collect();
+
     // Split images into atlas candidates (small sizes) and inline (large).
-    // For each size load BGRA pixels, then dispatch by point size.
-    let mut packed_imgs: Vec<crate::packer::PackedImage> = Vec::new();
-    let mut packed_meta: Vec<(String, u32, u32, u32, u16)> = Vec::new();
+    // For each size load BGRA pixels, then dispatch by point size. When
+    // `emit_variant_axis` is set, every sized rendition is duplicated for
+    // the alternate variant (same pixels — the variant axis is structural;
+    // CUICatalog reads it to pick which alternate to display per-appearance).
     for (img_path, pixel_size, scale) in icon_images {
         let (pd, w, h, pf) = load_image_as_bgra(img_path, false)?;
         let point_size = pixel_size / scale;
         let dim2 = icon_dim2(point_size);
-        let name = pre_rendered_name(
-            icon_name,
-            point_size,
-            *scale,
-            "NSAppearanceNameSystem",
-        );
-        if ATLAS_POINT_SIZES.contains(&point_size) {
-            let mut pi = crate::packer::PackedImage::new(
-                name.clone(),
-                ident as u32,
-                w,
-                h,
+        for &variant in variants {
+            let name = pre_rendered_name(
+                icon_name,
+                point_size,
+                *scale,
+                "NSAppearanceNameSystem",
             );
-            pi.pixel_data = pd;
-            pi.pixel_format = pf;
-            pi.scale = *scale;
-            pi.part = car::PART_ICON as u32;
-            pi.dim2 = dim2 as u32;
-            packed_imgs.push(pi);
-            packed_meta.push((name, *pixel_size, *scale, point_size as u32, dim2));
-        } else {
-            renditions.push(Rendition {
-                name,
-                identifier: ident,
-                element: car::ELEMENT_UNIVERSAL,
-                part: car::PART_ICON,
-                scale: *scale as u16,
-                width: w,
-                height: h,
-                pixel_data: pd,
-                pixel_format: pf,
-                layout: car::LAYOUT_ONE_PART_SCALE,
-                dim2,
-                keyformat: placeholder_kf.clone(),
-                min_deploy: min_deploy.to_string(),
-                platform: platform.to_string(),
-                colorspace_id: car::colorspace_for_pixel_format(&pf),
-                // Apple uses bitmapEncoding=0 (original) for the pre-rendered
-                // sized PNGs in .icon catalogs; the default (-1 → auto/4)
-                // sets the rendition_flags bit that makes CUICatalog look
-                // for a template variant that doesn't exist.
-                template_rendering_intent: 0,
-                ..Rendition::default()
-            });
+            if ATLAS_POINT_SIZES.contains(&point_size) {
+                let mut pi = crate::packer::PackedImage::new(
+                    name.clone(),
+                    ident as u32,
+                    w,
+                    h,
+                );
+                pi.pixel_data = pd.clone();
+                pi.pixel_format = pf;
+                pi.scale = *scale;
+                pi.part = car::PART_ICON as u32;
+                pi.dim2 = dim2 as u32;
+                pi.variant = variant as u32;
+                packed_imgs_per_variant[variant as usize].push(pi);
+            } else {
+                renditions.push(Rendition {
+                    name,
+                    identifier: ident,
+                    element: car::ELEMENT_UNIVERSAL,
+                    part: car::PART_ICON,
+                    scale: *scale as u16,
+                    width: w,
+                    height: h,
+                    pixel_data: pd.clone(),
+                    pixel_format: pf,
+                    layout: car::LAYOUT_ONE_PART_SCALE,
+                    dim2,
+                    variant,
+                    keyformat: placeholder_kf.clone(),
+                    min_deploy: min_deploy.to_string(),
+                    platform: platform.to_string(),
+                    colorspace_id: car::colorspace_for_pixel_format(&pf),
+                    // Apple uses bitmapEncoding=0 (original) for the pre-rendered
+                    // sized PNGs in .icon catalogs; the default (-1 → auto/4)
+                    // sets the rendition_flags bit that makes CUICatalog look
+                    // for a template variant that doesn't exist.
+                    template_rendering_intent: 0,
+                    ..Rendition::default()
+                });
+            }
         }
     }
-    drop(packed_meta);
 
-    // Pack 16/32/64 into one ZZZZPackedAsset atlas. Emit a packed_atlas
-    // rendition for the atlas image and one packed_ref rendition per source
-    // image referencing into the atlas via the INLK TLV.
-    if !packed_imgs.is_empty() {
+    // Pack 16/32/64 into ZZZZPackedAsset atlases — one atlas per variant
+    // when the variant axis is active. Each atlas's gamut field controls
+    // its name suffix and routes through to the rendition's attribute 24.
+    for (variant_idx, packed_imgs) in packed_imgs_per_variant.into_iter().enumerate() {
+        if packed_imgs.is_empty() {
+            continue;
+        }
         let pf = packed_imgs[0].pixel_format;
+        let variant = variant_idx as u16;
         let mut atlases = crate::packer::pack_images_split(packed_imgs, 262, 196);
         for atlas in &mut atlases {
+            atlas.gamut = variant_idx as u32;
             atlas.render();
             let atlas_name = atlas.name();
             // Apple uses LZFSE (not deepmap2) for atlases whose images are
@@ -514,6 +540,7 @@ fn build_icon_car(
                 pixel_data: Vec::new(),
                 pixel_format: pf,
                 layout: car::LAYOUT_NAME_LIST,
+                variant,
                 keyformat: placeholder_kf.clone(),
                 min_deploy: min_deploy.to_string(),
                 platform: platform.to_string(),
@@ -548,6 +575,7 @@ fn build_icon_car(
                     pixel_data: Vec::new(),
                     pixel_format: pf,
                     layout: car::LAYOUT_PACKED_IMAGE,
+                    variant,
                     keyformat: placeholder_kf.clone(),
                     min_deploy: min_deploy.to_string(),
                     platform: platform.to_string(),
@@ -1330,10 +1358,12 @@ fn build_bitmapkeys(
     }
     let mut out: Vec<(u32, Vec<u8>)> = Vec::new();
     for (ident, rows) in per_ident {
-        let mut buf = Vec::with_capacity(52);
+        // 4 bytes for the attr count + 4 bytes per attribute mask.
+        let body_size = 4 + 4 * keyformat.len() as u32;
+        let mut buf = Vec::with_capacity(16 + body_size as usize);
         buf.write_u32::<LittleEndian>(1).unwrap();
         buf.write_u32::<LittleEndian>(0).unwrap();
-        buf.write_u32::<LittleEndian>(40).unwrap();
+        buf.write_u32::<LittleEndian>(body_size).unwrap();
         buf.write_u32::<LittleEndian>(keyformat.len() as u32).unwrap();
         for &attr in keyformat {
             // Apple always emits -1 for these "variable" attrs even when

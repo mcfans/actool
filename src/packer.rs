@@ -34,6 +34,9 @@ pub struct PackedImage {
     /// pixels. CoreUI sets a CSI flag bit (0x04) for these so the runtime
     /// knows the rendition originated from a vector mask.
     pub is_svg_rasterization: bool,
+    /// Attribute 24 — appearance-variant axis. Variant=1 images route
+    /// into a separate atlas (gamut=1) per Apple's layout.
+    pub variant: u32,
 }
 
 impl PackedImage {
@@ -55,6 +58,7 @@ impl PackedImage {
             appearance: 0,
             direction: 0,
             is_svg_rasterization: false,
+            variant: 0,
         }
     }
 }
@@ -68,14 +72,27 @@ pub struct Atlas {
     pub dim1: u32,
     pub images: Vec<PackedImage>,
     pub pixel_data: Vec<u8>,
+    /// Apple's appearance-specialization axis baked into the atlas name
+    /// and tracked as attribute 24 on the atlas's rendition key. 0 for
+    /// the primary atlas; 1 for the alternate variant emitted alongside
+    /// when icon.json declares top-level fill-specializations.
+    pub gamut: u32,
 }
 
 impl Atlas {
     pub fn name(&self) -> String {
-        let fmt_idx = if &self.pixel_format == b"BGRA" { 0 } else { 1 };
+        // The third numeric component encodes either the legacy
+        // pixel-format index (0=BGRA, 1=GA8 — used by xcassets atlases)
+        // OR the appearance-variant gamut (1 for the alternate atlas
+        // emitted alongside the primary BGRA atlas on scrumdinger-shaped
+        // .icon bundles). They never coexist in practice — the legacy
+        // GA8 path always has gamut=0; the .icon variant atlases are
+        // always BGRA — so we just take whichever is non-zero.
+        let fmt_idx: u32 = if &self.pixel_format == b"BGRA" { 0 } else { 1 };
+        let third = if self.gamut > 0 { self.gamut } else { fmt_idx };
         format!(
-            "ZZZZPackedAsset-{}.{}.{}-gamut0",
-            self.scale, self.dim1, fmt_idx
+            "ZZZZPackedAsset-{}.{}.{}-gamut{}",
+            self.scale, self.dim1, third, self.gamut
         )
     }
 

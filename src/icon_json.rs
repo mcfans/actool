@@ -18,6 +18,12 @@ pub struct IconJson {
     pub supported_platforms: Option<SupportedPlatforms>,
     #[serde(default, rename = "color-space-for-untagged-svg-colors")]
     pub color_space_for_untagged_svg_colors: Option<String>,
+    /// Top-level `fill-specializations` — list of appearance-keyed fill
+    /// variants. When present, Apple's actool emits an alternate set of
+    /// pre-rendered sized renditions (attr 24 = 1) alongside the primary
+    /// set, plus an alternate atlas (gamut=1) for the small sizes.
+    #[serde(default, rename = "fill-specializations")]
+    pub fill_specializations: Option<Vec<serde_json::Value>>,
 }
 
 /// `fill` may be the string "automatic", a `{linear-gradient: [...]}`,

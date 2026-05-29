@@ -133,6 +133,7 @@ pub fn compile_catalog(
                     appearance: r.appearance as u32,
                     direction: r.direction as u32,
                     is_svg_rasterization: r.is_svg_rasterization,
+                    variant: r.variant as u32,
                 }
             })
             .collect();

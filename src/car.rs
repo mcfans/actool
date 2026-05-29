@@ -9,7 +9,7 @@ use byteorder::{LittleEndian, WriteBytesExt};
 use std::io::Write;
 
 // Keyformat tokens
-pub const KEYFORMAT_ALL: &[u16] = &[7, 13, 1, 2, 3, 4, 17, 8, 9, 11, 12];
+pub const KEYFORMAT_ALL: &[u16] = &[7, 13, 1, 2, 3, 4, 17, 8, 9, 11, 12, 24];
 pub const KEYFORMAT_OPTIONAL: &[u16] = &[4, 8, 9];
 
 pub const DIRECTION_DEFAULT: u16 = 0;
@@ -107,6 +107,7 @@ where
     let used_direction = renditions.iter().any(|r| r.direction() != 0);
     let used_dim1 = force_dim1 || renditions.iter().any(|r| r.dim1() != 0);
     let used_dim2 = renditions.iter().any(|r| r.dim2() != 0);
+    let used_variant = renditions.iter().any(|r| r.variant() != 0);
     KEYFORMAT_ALL
         .iter()
         .copied()
@@ -114,6 +115,10 @@ where
             4 => used_direction,
             8 => used_dim1,
             9 => used_dim2,
+            // Attribute 24 ("variant") is Apple's appearance-specialization
+            // axis — when no rendition has variant != 0, it's omitted. The
+            // scrumdinger .icon fixture is the first to exercise it.
+            24 => used_variant,
             _ => true,
         })
         .collect()
@@ -124,6 +129,9 @@ pub trait KeyformatRendition {
     fn direction(&self) -> u32;
     fn dim1(&self) -> u32;
     fn dim2(&self) -> u32;
+    fn variant(&self) -> u32 {
+        0
+    }
 }
 
 pub fn make_carheader(rendition_count: u32) -> Vec<u8> {
@@ -192,6 +200,10 @@ pub struct RenditionKeyParts {
     pub dim2: u16,
     pub layer: u16,
     pub scale: u16,
+    /// Attribute 24 — Apple's appearance-specialization axis. 0 = primary,
+    /// 1+ = alternate variants emitted when icon.json has top-level
+    /// `fill-specializations`.
+    pub variant: u16,
 }
 
 pub fn make_rendition_key(parts: RenditionKeyParts, keyformat: &[u16]) -> Vec<u8> {
@@ -209,6 +221,7 @@ pub fn make_rendition_key(parts: RenditionKeyParts, keyformat: &[u16]) -> Vec<u8
             9 => parts.dim2,
             11 => parts.layer,
             12 => parts.scale,
+            24 => parts.variant,
             _ => 0,
         };
         buf.write_u16::<LittleEndian>(v).unwrap();
@@ -1248,6 +1261,11 @@ pub struct Rendition {
     /// way so they composite with alpha against other stack layers, even
     /// when the source is fully opaque.
     pub force_non_opaque: bool,
+    /// Attribute 24 — appearance-variant axis. 0 = primary (most
+    /// renditions), 1 = alternate variant emitted alongside the primary
+    /// when icon.json declares top-level `fill-specializations`. When any
+    /// rendition has variant != 0, attribute 24 is added to KEYFORMAT.
+    pub variant: u16,
 }
 
 impl Default for Rendition {
@@ -1279,6 +1297,7 @@ impl Default for Rendition {
             platform: "macosx".to_string(),
             csi_override: None,
             force_non_opaque: false,
+            variant: 0,
         }
     }
 }
@@ -1292,6 +1311,9 @@ impl KeyformatRendition for Rendition {
     }
     fn dim2(&self) -> u32 {
         self.dim2 as u32
+    }
+    fn variant(&self) -> u32 {
+        self.variant as u32
     }
 }
 
@@ -1342,6 +1364,7 @@ impl Rendition {
             dim2: self.dim2,
             layer: 0,
             scale: self.scale,
+            variant: self.variant,
         };
         make_rendition_key(parts, &self.keyformat)
     }
@@ -1544,6 +1567,7 @@ mod tests {
             dim2: 0,
             layer: 0,
             scale: 2,
+            variant: 0,
         };
         let k = make_rendition_key(p, &[7, 13, 1, 2, 3, 17, 11, 12]);
         assert_eq!(k.len(), 16);
