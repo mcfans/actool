@@ -277,3 +277,28 @@ You can create tools to help the analysis, comparison, compiling, etc. but the m
 
 Use Rust integration tests under `tests/` (one file per area, e.g. `packing_regressions.rs`, `dmp2_regressions.rs`) for full-flow coverage, and run `tools/validate_repos.py --only <slug>` to check results against third-party repositories.
 Don't use comments that repeat the code logic. Only use comments for details about why the code is there.
+
+## Debugging `.car` parity issues
+
+Three complementary tools — use all three:
+- `./tools/validate_car <path>` — runs CoreUI's actual `imagesWithName:` / `colorWithName:` paths. Closest signal to "does it work in a real app?" Apple's reference reports 9 OK / 1 FAIL on the element-web fixture; that's the parity target.
+- `python3 tools/compare_car.py <a> <b>` — structural diff; now audits BOM physical layout (inline-key region, BITMAPKEYS, tree headers, named-block order) — the categories most likely to cause silent CUICatalog failures.
+- `/usr/bin/actool` is the reference. Compile our output and Apple's into separate local dirs (not `/tmp/`-shared) at the same `--minimum-deployment-target` and diff.
+
+Element-web `.icon` at `third_party/element-web/apps/desktop/build/icon.icon/` is the canonical IconComposer fixture (1 group, 1 layer, `fill: "automatic"` → 5 Color + 2 Gradient renditions).
+
+### `.icon` (IconComposer) catalog gotchas that cost many sessions to find
+
+These are all *silent* — the catalog loads, but `imagesWithName:` returns empty. None surface in a naive tree-walk diff.
+
+- **BOM leaf inline-key region.** Fixed-key trees (RENDITIONS, APPEARANCEKEYS) pack the rendition keys directly after the entry table, separated by a 4-byte zero gap, then pad to total leaf size = `block_size + n × key_size`. CUICatalog reads facet→rendition mappings from this packed region. If it's zero-filled or wrong-offset, every lookup silently returns empty even when the separate key blocks are byte-perfect. See `bom.rs::build_leaf_node`.
+- **CARHEADER coreUI version must be 975 for IconComposer.** Lower values activate the legacy path and lookups fail. `car::make_carheader_versioned(n, 975)` for `.icon`; default `972` elsewhere.
+- **BITMAPKEYS must list every facet identifier** with a 52-byte attribute-mask blob (`-1` for variable attrs 7/1/2/17; bitmask of seen values for the rest). See `icon_bundle::build_bitmapkeys`. An empty tree breaks every facet lookup.
+- **Color/Gradient rendition KEYS use `scale=1`** even though the CSI's `scale_factor` field is 0. `colorWithName:displayGamut:` filters at the key level.
+- **Pre-rendered icon PNG renditions need `template_rendering_intent: 0`** (original). The default `-1` → automatic (4) sets a flag that makes CUICatalog look for a template variant.
+- **`.icon` layer assets need `force_non_opaque: true`** so CELM encodes ver=0 (non-opaque) regardless of source alpha — layers always composite with alpha inside iconstack rendering.
+
+Other surprising behaviors:
+- Apple emits the **same** `.car` at every `--minimum-deployment-target` from 11.0–26.0 — only the `deploymentPlatformVersion` string in EXTENDED_METADATA changes. No version-specific output paths.
+- For `.icon` bundles Apple **never** writes `.icns` and **always** writes an empty `<dict/>` plist (181 bytes), regardless of `--standalone-icon-behavior`. The legacy xcassets path (`compiler.rs`) still emits both.
+- BOM named-block emission order: `CARHEADER, RENDITIONS, FACETKEYS, APPEARANCEKEYS, KEYFORMAT, EXTENDED_METADATA, BITMAPKEYS` (RENDITIONS early, KEYFORMAT late) — not load-blocking on its own but reduces the diff.
