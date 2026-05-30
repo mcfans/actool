@@ -97,7 +97,9 @@ pub fn compile_catalog(
     }
 
     let mut all_entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-    let mut dim1_by_scale: IndexMap<u16, u16> = IndexMap::new();
+    // dim1 (atlas index) is counted within each (scale, idiom): Apple resets
+    // it to 0 for the first atlas of every idiom at a scale, not once per scale.
+    let mut dim1_by_scale: IndexMap<(u16, u16), u16> = IndexMap::new();
 
     // Sort pack groups: (scale ascending, then GA8 before BGRA) matching Python.
     // In Python: key=lambda g: (g[1], 0 if g[0] == b"BGRA" else 1), but
@@ -109,6 +111,9 @@ pub fn compile_catalog(
     for (fmt, scale, idxs) in &pack_groups {
         let sprite_atlas_id =
             idxs.first().map(|i| renditions[*i].sprite_atlas_id).unwrap_or(0);
+        // All renditions in a pack group share an idiom (it's part of the
+        // group key), so the first one names the group's idiom.
+        let group_idiom = idxs.first().map(|i| renditions[*i].idiom).unwrap_or(0);
 
         let packed_imgs: Vec<PackedImage> = idxs
             .iter()
@@ -148,7 +153,7 @@ pub fn compile_catalog(
 
         let mut atlases = packer::pack_images_split(packed_imgs, 262, 196);
         for atlas in &mut atlases {
-            let dim1_counter = *dim1_by_scale.get(scale).unwrap_or(&0);
+            let dim1_counter = *dim1_by_scale.get(&(*scale, group_idiom)).unwrap_or(&0);
             atlas.dim1 = dim1_counter as u32;
             atlas.render();
 
@@ -225,7 +230,7 @@ pub fn compile_catalog(
                 );
                 all_entries.push((ref_key, ref_csi));
             }
-            dim1_by_scale.insert(*scale, dim1_counter + 1);
+            dim1_by_scale.insert((*scale, group_idiom), dim1_counter + 1);
         }
     }
 

@@ -320,5 +320,4 @@ Done: **per-idiom MultiSized renditions** (`catalog::parse_appiconset` groups ic
 
 Remaining (matched renditions ~19/29 vs reference; the CAR loads):
 - **Subtype 1792 (Plus/Max phone) synthesis**: actool generates a 90pt@2x icon (180px) by reusing the 60pt@3x (180px) source, with subtype=1792 on both the leaf and a *dedicated* phone multisize `{90:7}` (the one per-idiom-split facet we don't yet emit).
-- **Atlas geometry**: our shelf packer's atlas widths/contents differ from Apple's (e.g. atlas name `…-2.0.0-…` vs Apple's `…-2.1.0-…`), so packed bytes aren't identical.
-- **dim1 should reset per (scale, idiom)**: Apple counts dim1 from 0 within each idiom at a scale; our `dim1_by_scale` counts per scale across idioms, so a 2nd idiom's first atlas gets dim1=1 instead of 0.
+- **Atlas geometry**: our shelf packer's atlas widths/contents differ from Apple's (e.g. atlas name `…-2.0.0-…` vs Apple's `…-2.1.0-…`), so packed bytes aren't identical. (dim1 itself now resets per (scale, idiom) — `dim1_by_scale` is keyed by `(scale, idiom)` — so the atlas-key dim1 values match Apple even though the geometry doesn't.)
