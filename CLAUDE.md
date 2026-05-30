@@ -320,6 +320,18 @@ Done: **per-idiom MultiSized renditions** (`catalog::parse_appiconset` groups ic
 
 Done: **subtype-1792 Plus-phone synthesis** (`catalog::parse_appiconset`). When a 60pt@3x iPhone icon is present, actool synthesizes a 90pt@2x icon (subtype 1792) reusing that 180px source, plus a dedicated phone/subtype-1792 multisize `{90:7}`. We clone the 60pt@3x rendition (scale→2, subtype→1792, dim2→7), and the multisize grouping keys by (idiom, subtype). The synthesized leaf is forced inline (`packer`: subtype≠0 → inline). Rendition count now matches the reference exactly (29=29); matched 23/29.
 
-Remaining (the CAR loads; only atlas geometry differs):
-- **Atlas geometry**: our shelf packer's atlas widths/contents differ from Apple's, so the packed atlas bytes and names (`…-2.0.0-…` vs Apple's `…-2.1.0-…`) aren't identical. All non-atlas renditions match.
+Remaining — **atlas geometry only** (the CAR loads; every non-atlas rendition, key, multisize and the subtype-1792 synthesis match the reference). This is the last gap to full byte-parity and it is *functionally irrelevant*: CUICatalog reads packed icons via the exact INLK (x,y,w,h) coordinates, so a different atlas arrangement still resolves correctly (validate_car OK).
+
+Apple's icon packer is a **shelf+column 2D bin-packer** (margin=2, gap=2, descending size sort — same *structure* as `packer::pack_shelf_atlas`), but its max-dimension and atlas-split heuristics are **not derivable** from the samples collected and resist a clean rule:
+- Variable max width: an iPad atlas reaches **324** wide (`[167,152]`) while a phone atlas caps at **306** (`[180,120]` then wraps).
+- Non-geometric splits: `four_3x = [180,120,87,60]` → `[180,120,87]` + a separate `[60]` atlas, even though the 60px icon fits geometrically in the first atlas. No fixed max-dimension, max-area, aspect-ratio, 2-row, dim2-threshold, or home-screen rule fits all cases.
+- Atlas name middle field is a constant **1** for app-icon atlases (`ZZZZPackedAsset-{scale}.1.0-gamut0`) — decoupled from the key's dim1 (which is 0/1). For imagesets the middle is the dim1 (`…-{scale}.0.0-…`), and our imageset packing matches Apple (Python-ref parity tests).
+
+Exact reference atlas layouts for the canonical phone+ipad+marketing fixture (margin 2, gap 2), as `WxH @ (x,y)`:
+- scale1 pad 122×102: 76@(2,2) 40@(80,2) 20@(2,80) 29@(80,44)
+- scale2 phone 206×184: 120@(2,2) 80@(124,2) 58@(2,124) 40@(62,124)
+- scale2 pad-A 324×170: 167@(2,2) 152@(171,2)   ·   scale2 pad-B 144×126: 80@(2,2) 58@(84,2) 40@(2,84)
+- scale3 phone-A 306×272: 180@(2,2) 120@(184,2) 87@(2,184)   ·   scale3 phone-B 64×64: 60@(2,2)
+
+Cracking this needs a larger controlled sample sweep to reverse the split/sizing heuristic; do NOT retune the shared `pack_images_split` for it (that would break imageset parity) — give icons their own packer.
 - **Atlas geometry**: our shelf packer's atlas widths/contents differ from Apple's (e.g. atlas name `…-2.0.0-…` vs Apple's `…-2.1.0-…`), so packed bytes aren't identical. (dim1 itself now resets per (scale, idiom) — `dim1_by_scale` is keyed by `(scale, idiom)` — so the atlas-key dim1 values match Apple even though the geometry doesn't.)
