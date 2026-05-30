@@ -302,3 +302,16 @@ Other surprising behaviors:
 - Apple emits the **same** `.car` at every `--minimum-deployment-target` from 11.0–26.0 — only the `deploymentPlatformVersion` string in EXTENDED_METADATA changes. No version-specific output paths.
 - For `.icon` bundles Apple emits `<app-icon>.icns` **and** a populated partial plist (`CFBundleIconFile` + `CFBundleIconName`) iff the bundle's filename stem matches `--app-icon` case-sensitively. Stem mismatch → only `Assets.car` + an empty `<dict/>` plist (181 bytes). Neither `supported-platforms` nor `--standalone-icon-behavior` affects this gate (verified on `Icon.icon` vs `lc_icon.icon` and against `--standalone-icon-behavior none`). The legacy xcassets path (`compiler.rs`) still emits both.
 - BOM named-block emission order: `CARHEADER, RENDITIONS, FACETKEYS, APPEARANCEKEYS, KEYFORMAT, EXTENDED_METADATA, BITMAPKEYS` (RENDITIONS early, KEYFORMAT late) — not load-blocking on its own but reduces the diff.
+
+### iOS platform (`--platform iphoneos`)
+
+Implemented (`car.rs::is_idiom_platform`/`idiom_value`/`deployment_platform_name`/`KEYFORMAT_IOS`/`make_carheader_full`, `compiler.rs`, `catalog.rs::stamp_idiom`):
+- Rendition keys carry **Idiom (attr 15)** + **Subtype (attr 16)**; idiom enum: universal=0, iphone/phone=1, ipad/pad=2, tv=3, car=4, watch=5, ios-marketing/marketing=6.
+- Imageset key format is fixed `[7,13,12,15,16,17,1,2]` (no trimming like macOS). CARHEADER = CoreUI **975** / key-semantics **2**. EXTENDED_METADATA platform string is **"ios"** (device family, not "iphoneos"). APPEARANCEKEYS always emits `UIAppearanceAny=0`. Imagesets keep iphone/ipad/universal and drop `mac` + `ios-marketing`.
+- **App icons**: emit loose `@2x` home-screen PNGs per idiom (`AppIcon60x60@2x.png`, `AppIcon76x76@2x~ipad.png` — primary sizes iphone=60/ipad=76; marketing is CAR-only) and the iOS partial plist (`CFBundleIcons`/`CFBundleIcons~ipad`, each with `CFBundleIconName` always and `CFBundleIconFiles` when the idiom ships an icon; iPad list = iPhone primary + iPad primary, populated only when iPad has an icon). No `.icns`. Icon renditions are idiom-tagged.
+
+**App-icon CAR parity still incomplete** (verified-but-unimplemented; reference via `/usr/bin/actool --platform iphoneos --app-icon AppIcon`). The CAR loads (`validate_car` OK) but does not byte-match. Remaining:
+- **App-icon key format adds dim2(9)+dim1(8)**: `[7,13,12,15,16,9,8,17,1,2]` (note 9 *before* 8 — opposite of macOS's `…8,9…`).
+- **Per-(idiom,subtype) MultiSized renditions**, each MSIS entry tagged with idiom. iOS size→index map: 20→1, 29→2, 40→3, 60→4, 76→5, 83.5→6, 90→7, 1024→8 (macOS `icon_dim2` in `catalog.rs` is wrong for iOS — returns 0). Reference emits: phone `{20:1,29:2,40:3,60:4}`, phone/**subtype 1792** `{90:7}`, pad `{20:1,29:2,40:3,76:5,83:6}`, marketing `{1024:8}`.
+- **Subtype 1792 (Plus/Max phone) synthesis**: actool generates a 90pt@2x icon (180px) by reusing the 60pt@3x (180px) source, with subtype=1792 on both the leaf and a dedicated phone multisize.
+- **Icon atlas packing**: small icons pack into `ZZZZPackedAsset-*-gamut0` atlases (e.g. 40@2/58@2/80@2 → one atlas) like the macOS sprite path; our iOS app-icon output currently stores them inline.
