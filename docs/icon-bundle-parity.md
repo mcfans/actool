@@ -102,12 +102,18 @@ this, sized renditions were the raw layer on a full square; now non-variant
 
 Not reproduced: the drop shadow, specular highlight, and the layer's raised
 glass shading; the exact layer inset/scale (Apple insets the layer slightly).
+The gradient stops are interpolated in device-RGB rather than Apple's space,
+leaving a residual ≈6/luma curve difference across the gradient.
 
 **Variant-axis bundles** (top-level `fill-specializations`, e.g. feishin /
-scrumdinger) are unchanged: their sized renditions are GA8/GA16 *tint masks*
-that CUICatalog composites against the gradient itself (a different render
-path), and a deepmap2-coded mask we don't yet decode — so the squircle
-compositing above is applied only to the non-variant (BGRA) path.
+scrumdinger) store the *same* composite, just as grayscale: primary variant →
+GA8 (light gradient), alternate → GA16 (dark gradient). Decoding Apple's
+renditions (the `KCBC` = chunked-LZFSE envelope, 85 rows/chunk) confirmed they
+hold the gradient squircle, not a tint mask — so we composite there too and the
+GA8 matches Apple's to ≈6/luma. CUICatalog's *end-to-end* render of a
+variant-axis icon still differs (it recomposes the layer over the gradient via
+the iconstack, a structure we don't fully drive yet), but the stored rendition
+content now matches.
 
 ## Reproduce
 

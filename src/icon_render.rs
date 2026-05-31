@@ -221,9 +221,11 @@ pub fn composite_icon(
         ];
         let locs: [c_double; 2] = [0.0, 1.0];
         let grad = (s.grad_create)(cs, comps.as_ptr(), locs.as_ptr(), 2);
+        // icon.json orientation y and this context share a top-down y axis
+        // (y=1 is the top edge), matching the layer draw — map straight through.
         let to_ctx = |p: [f32; 2]| CGPoint {
             x: margin + p[0] as f64 * content,
-            y: margin + (1.0 - p[1] as f64) * content,
+            y: margin + p[1] as f64 * content,
         };
         // DrawsBeforeStartLocation | DrawsAfterEndLocation = 3 (extend ends).
         (s.draw_linear)(ctx, grad, to_ctx(gradient.start), to_ctx(gradient.stop), 3);

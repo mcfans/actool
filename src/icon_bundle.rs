@@ -465,11 +465,15 @@ fn build_icon_car(
     let mut packed_imgs_per_variant: Vec<Vec<crate::packer::PackedImage>> =
         variants.iter().map(|_| Vec::new()).collect();
 
-    // For non-variant bundles the sized rendition is the layer composited over
-    // the background gradient (Gradient-1, the light/primary fill) and clipped
-    // to the macOS squircle. Resolve it once; with no gradient we fall back to
-    // the raw layer.
+    // The sized rendition is the layer composited over the icon's background
+    // gradient and clipped to the macOS squircle. The primary variant uses the
+    // light gradient (Gradient-1), the alternate uses the dark one (Gradient-2);
+    // verified by decoding Apple's GA8/GA16 renditions with libdm2's KCBC path.
+    // With no gradient we fall back to the raw layer.
     let light_fill = gradient_assets.first().and_then(|g| resolve_gradient_fill(g, color_assets));
+    let dark_fill = gradient_assets
+        .get(1)
+        .and_then(|g| resolve_gradient_fill(g, color_assets));
 
     // Split images into atlas candidates (small sizes) and inline (large).
     // For each size load BGRA pixels, then dispatch by point size. When
@@ -484,25 +488,29 @@ fn build_icon_car(
         let point_size = pixel_size / scale;
         let dim2 = icon_dim2(point_size);
         for &variant in variants {
-            // The variant axis is also a render-target switch: Apple stores the
-            // sized renditions as grayscale tinting MASKS (variant 0 → GA8
-            // cspace 2, variant 1 → GA16 cspace 6) that CUICatalog tints and
-            // composites over the gradient itself — so we keep the bare layer
-            // there. Without the variant axis the sized rendition is the final
-            // BGRA composite: the layer over the background gradient clipped to
-            // the squircle, which we render here.
+            // Composite the layer over the variant's background gradient,
+            // clipped to the squircle. The alternate variant uses the dark
+            // gradient when present.
+            let fill = if variant == 1 {
+                dark_fill.as_ref().or(light_fill.as_ref())
+            } else {
+                light_fill.as_ref()
+            };
+            let composited = match fill {
+                Some(f) => crate::icon_render::composite_icon(*pixel_size, f, &layer_bgra)
+                    .unwrap_or_else(|| layer_bgra.clone()),
+                None => layer_bgra.clone(),
+            };
+            // With the variant axis the composite is stored as a grayscale
+            // image (variant 0 → GA8 cspace 2, variant 1 → GA16 cspace 6);
+            // otherwise it stays BGRA.
             let (pd, pf, cs_id): (Vec<u8>, [u8; 4], u32) = if emit_variant_axis {
                 if variant == 0 {
-                    (crate::catalog::bgra_to_ga8_force(&layer_bgra), *b" 8AG", 2)
+                    (crate::catalog::bgra_to_ga8_force(&composited), *b" 8AG", 2)
                 } else {
-                    (crate::catalog::bgra_to_ga16_force(&layer_bgra), *b"61AG", 6)
+                    (crate::catalog::bgra_to_ga16_force(&composited), *b"61AG", 6)
                 }
             } else {
-                let composited = match light_fill.as_ref() {
-                    Some(f) => crate::icon_render::composite_icon(*pixel_size, f, &layer_bgra)
-                        .unwrap_or_else(|| layer_bgra.clone()),
-                    None => layer_bgra.clone(),
-                };
                 (composited, *b"BGRA", car::colorspace_for_pixel_format(b"BGRA"))
             };
             let name = pre_rendered_name(
