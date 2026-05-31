@@ -285,7 +285,7 @@ Three complementary tools — use all three:
 - `python3 tools/compare_car.py <a> <b>` — structural diff; now audits BOM physical layout (inline-key region, BITMAPKEYS, tree headers, named-block order) — the categories most likely to cause silent CUICatalog failures.
 - `/usr/bin/actool` is the reference. Compile our output and Apple's into separate local dirs (not `/tmp/`-shared) at the same `--minimum-deployment-target` and diff.
 
-Element-web `.icon` at `third_party/element-web/apps/desktop/build/icon.icon/` is the canonical IconComposer fixture (1 group, 1 layer, `fill: "automatic"` → 5 Color + 2 Gradient renditions).
+Element-web `.icon` at `third_party/element-web/apps/desktop/build/icon.icon/` is the canonical IconComposer fixture (1 group, 1 layer, `fill: "automatic"` → 5 Color + 2 Gradient renditions). For the overall `.icon` parity status — what is byte-matched vs renderer-bound, and why byte-for-byte is impossible (Apple embeds random UUIDs in rendition names) — see `docs/icon-bundle-parity.md`. Bundles with a top-level `fill-specializations` block (feishin, scrumdinger) derive their Color/Gradient palette from `fill_specializations_assets`, not the plain-`fill` shapes.
 
 ### `.icon` (IconComposer) catalog gotchas that cost many sessions to find
 
