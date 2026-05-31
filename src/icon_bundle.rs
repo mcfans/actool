@@ -76,8 +76,12 @@ fn pre_rendered_name(
     let tail_hex: String = tail_uuid.chars().filter(|c| *c != '-').collect();
     let pid = &tail_hex[0..5];
     let hex = &tail_hex[5..21];
+    // Apple prefixes the pre-rendered name with the bundle stem (the
+    // `--app-icon` name), not a literal "icon": feishin.icon → "feishin16x16…".
+    // element-web's stem happens to be "icon", which is why the old literal
+    // matched it.
     format!(
-        "icon{point_size}x{point_size}_{appearance_name}_{uuid}-{pid}-{hex}.png"
+        "{icon_name}{point_size}x{point_size}_{appearance_name}_{uuid}-{pid}-{hex}.png"
     )
 }
 
@@ -262,11 +266,8 @@ pub fn compile_icon_bundle(
         }
     }
 
-    // SVG layer assets get rasterized to a tmp PNG at their intrinsic
-    // size (or 1024x1024 fallback) so the existing build_icon_car path
-    // can use load_image_as_bgra unchanged.
-    let layer_assets = materialize_svg_layer_assets(layer_assets, &tmpdir)?;
-
+    // SVG-sourced layers are emitted as Vector renditions (raw SVG) by
+    // build_icon_car, so they pass through untouched here.
     // Top-level fill-specializations triggers Apple's appearance-variant
     // expansion: a second set of pre-rendered sized renditions + an
     // alternate atlas keyed on attribute 24 = 1. Verified on scrumdinger.
@@ -435,46 +436,6 @@ fn find_all_source_images(bundle: &Path, json: &serde_json::Value) -> Vec<PathBu
         }
     }
     out
-}
-
-/// For every SVG-source layer asset, rasterize to a PNG in `tmpdir` and
-/// return a copy of the LayerAsset pointing at the PNG. PNG-source layers
-/// are passed through unchanged. Used to converge the SVG-source and
-/// PNG-source `.icon` paths on a single IconComposer emit pipeline.
-fn materialize_svg_layer_assets(
-    layer_assets: Vec<LayerAsset>,
-    tmpdir: &Path,
-) -> Result<Vec<LayerAsset>> {
-    let mut out = Vec::with_capacity(layer_assets.len());
-    for asset in layer_assets {
-        let lower = asset.source_path.to_string_lossy().to_lowercase();
-        if !lower.ends_with(".svg") {
-            out.push(asset);
-            continue;
-        }
-        let svg_data = fs::read(&asset.source_path)?;
-        let (sw, sh) = crate::svg_raster::parse_svg_dimensions(&svg_data);
-        let (w, h) = if sw > 0 && sh > 0 { (sw, sh) } else { (1024, 1024) };
-        let bgra = crate::svg_raster::rasterize_svg(&svg_data, w, h, 1)?;
-        let mut rgba = bgra;
-        for px in rgba.chunks_exact_mut(4) {
-            px.swap(0, 2);
-        }
-        let img = image::RgbaImage::from_raw(w, h, rgba)
-            .ok_or_else(|| anyhow::anyhow!("svg rasterization size mismatch"))?;
-        let stem = asset
-            .source_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("layer");
-        let png_path = tmpdir.join(format!("layer_{stem}.png"));
-        img.save(&png_path)?;
-        out.push(LayerAsset {
-            facet_name: asset.facet_name,
-            source_path: png_path,
-        });
-    }
-    Ok(out)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -703,6 +664,44 @@ fn build_icon_car(
     }
     for asset in layer_assets {
         let asset_ident = hash_name(&asset.facet_name);
+        let is_svg = asset
+            .source_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("svg"))
+            .unwrap_or(false);
+        if is_svg {
+            // An SVG-sourced layer is stored as a Vector rendition holding the
+            // raw SVG (named "image.svg"), not a rasterized bitmap. Apple keeps
+            // the vector so the layer can be re-rendered at any scale.
+            let svg_data = fs::read(&asset.source_path)?;
+            let csi = car::build_svg_csi("image.svg", &svg_data);
+            renditions.push(Rendition {
+                name: "image.svg".to_string(),
+                identifier: asset_ident,
+                element: car::ELEMENT_UNIVERSAL,
+                part: car::PART_REGULAR,
+                scale: 1,
+                width: 0,
+                height: 0,
+                pixel_data: Vec::new(),
+                pixel_format: *car::PIXELFMT_SVG,
+                layout: car::LAYOUT_PDF,
+                keyformat: placeholder_kf.clone(),
+                min_deploy: min_deploy.to_string(),
+                platform: platform.to_string(),
+                colorspace_id: 0,
+                csi_override: Some(csi),
+                ..Rendition::default()
+            });
+            facets.push((
+                asset.facet_name.clone(),
+                car::ELEMENT_UNIVERSAL,
+                Some(car::PART_REGULAR),
+                asset_ident,
+            ));
+            continue;
+        }
         let (pd, w, h, pf) = load_image_as_bgra(&asset.source_path, false)?;
         // Apple's actool normalizes the in-CAR rendition name for a layer's
         // source image to "image.png" rather than the original filename.
@@ -1456,12 +1455,12 @@ mod tests {
 
     #[test]
     fn pre_rendered_name_matches_apple_pattern() {
-        let n = pre_rendered_name("Icon", 16, 2, "NSAppearanceNameSystem");
-        assert!(n.starts_with("icon16x16_NSAppearanceNameSystem_"));
+        let n = pre_rendered_name("feishin", 16, 2, "NSAppearanceNameSystem");
+        assert!(n.starts_with("feishin16x16_NSAppearanceNameSystem_"));
         assert!(n.ends_with(".png"));
         // Pattern: prefix + UUID(8-4-4-4-12) + - + 5 hex + - + 16 hex + .png
         let body = n
-            .trim_start_matches("icon16x16_NSAppearanceNameSystem_")
+            .trim_start_matches("feishin16x16_NSAppearanceNameSystem_")
             .trim_end_matches(".png");
         let parts: Vec<&str> = body.split('-').collect();
         assert_eq!(parts.len(), 7, "expected UUID-PID-HEX shape, got {n:?}");

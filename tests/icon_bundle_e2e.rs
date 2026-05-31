@@ -486,9 +486,12 @@ fn solid_srgb_fill_emits_4_colors_1_gradient_with_user_color() {
 fn svg_source_bundle_does_not_emit_legacy_pdf_only_catalog() {
     // The KYA SIGSEGV regression. Pre-d4ebe6f, an SVG-source `.icon`
     // would emit a single LAYOUT_PDF (9) rendition + a FACETKEYS entry
-    // pointing at it — CUICatalog crashed during enumeration. After the
-    // fix, SVG layers are rasterized into the IconComposer pipeline and
-    // we get the normal multisize aggregate + per-layer asset.
+    // pointing at it — CUICatalog crashed during enumeration. The catalog
+    // must instead be a full IconComposer catalog (multisize aggregate +
+    // sized renditions). Apple stores the SVG layer source itself as a
+    // single Vector rendition named "image.svg" (LAYOUT_PDF), so a lone
+    // PDF rendition coexisting with the full structure is now expected —
+    // what must never recur is a PDF-*only* catalog.
     let dir = tempdir();
     let bundle = build_icon_bundle(
         dir.path(),
@@ -505,35 +508,47 @@ fn svg_source_bundle_does_not_emit_legacy_pdf_only_catalog() {
     let car = parse_car(&out.join("Assets.car"));
 
     let root = tree_root_idx(&car, "RENDITIONS");
-    let mut layouts = std::collections::HashMap::<u16, usize>::new();
+    let mut total_renditions = 0usize;
     let mut has_multisize = false;
-    let mut layer_asset_rendition_count = 0usize;
+    let mut svg_layer_rendition_count = 0usize;
+    let mut png_layer_rendition_count = 0usize;
+    let mut pdf_layout_count = 0usize;
     for (_, val) in walk_tree(&car, root) {
         if val.len() < 184 || &val[..4] != b"ISTC" {
             continue;
         }
+        total_renditions += 1;
         let layout = u16::from_le_bytes([val[36], val[37]]);
-        *layouts.entry(layout).or_insert(0) += 1;
         if layout == 1010 {
             has_multisize = true;
         }
+        if layout == 9 {
+            pdf_layout_count += 1;
+        }
         let name_end = 40 + val[40..168].iter().position(|&b| b == 0).unwrap_or(0);
         let name = std::str::from_utf8(&val[40..name_end]).unwrap_or("");
+        if name == "image.svg" {
+            svg_layer_rendition_count += 1;
+        }
         if name == "image.png" {
-            layer_asset_rendition_count += 1;
+            png_layer_rendition_count += 1;
         }
     }
     assert!(has_multisize, "SVG-source .icon must emit a multisize aggregate");
     assert_eq!(
-        layer_asset_rendition_count, 1,
-        "SVG-source layer should produce exactly one rasterized image.png rendition"
+        svg_layer_rendition_count, 1,
+        "SVG-source layer should be stored as exactly one Vector image.svg rendition"
     );
-    // No LAYOUT_PDF should appear in IconComposer output. Its presence
-    // signals the legacy build_svg_icon_car path is back.
     assert_eq!(
-        layouts.get(&9).copied().unwrap_or(0),
-        0,
-        "regression: SVG-source .icon emitted a LAYOUT_PDF rendition (legacy path)"
+        png_layer_rendition_count, 0,
+        "SVG-source layer must not be rasterized to an image.png rendition"
+    );
+    // Exactly one LAYOUT_PDF — the layer vector — and it must not be the
+    // whole catalog (the legacy PDF-only path is the SIGSEGV regression).
+    assert_eq!(pdf_layout_count, 1, "expected exactly the layer Vector rendition");
+    assert!(
+        total_renditions > 5,
+        "PDF-only catalog regression: only {total_renditions} renditions"
     );
     // The catalog must still pass the inline-key audit — same invariant
     // as the PNG path.
