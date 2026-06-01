@@ -122,10 +122,17 @@ tint (subtractive `D·(1−colour)`), the "raised glass" σ≈19 px edge blur, a
 fixed `824/1024` layer/gradient placement are all reproduced; see
 `icon-shading.md`.
 
-Not reproduced: the **per-layer drop shadow** (a glass layer casting a soft
-offset-down shadow on the background within the icon — KYA's cup; from
-`shadow: layer-color`), and the squircle's drop shadow into the margin is
-slightly weaker than Apple's.
+Now reproduced — the **per-layer drop shadow**: a glass layer with
+`shadow: layer-color`/`neutral` casts a soft offset-down shadow on the
+background (KYA's cup, Rectangle's Overlay). Measured
+(`tools/probe_layer_shadow.py`) as a subtractive `(1−colour)` darkening (same
+form as the glass tint), peak ≈ 0.49·opacity (`layer-color`; ~0.10 for
+`neutral`), offset down ~12 px and blurred σ ≈ 17 px. `render_layer_stack`
+accumulates it per layer, offsets + blurs, and subtracts it from the background
+under the layers; our profile matches Apple's (below −43/−38/−30/−20/−10 vs
+−45/−40/−32/−21/−11; above −14/−10/−6 vs −13/−9/−5). KYA's mean diff dropped
+9.1→7.3. The squircle's drop shadow into the margin is still slightly weaker
+than Apple's.
 The background gradient now matches to ≈1/luma: a black→white probe
 (`tools/probe_gradient_space.py`) showed Apple interpolates in the **same**
 component-linear space we do — the old "device-RGB vs Apple's space" residual was

@@ -137,8 +137,17 @@ icon: for interior pixels within the edge band it adds `L0·(1−d/16.5)` of whi
 in linear space, where `L0 = 0.286 + 0.083·dir` and `dir = (−nx−ny)/√2` from the
 squircle SDF's outward normal. Our edge profile matches Apple's (top
 +57/+43/+27 vs +58/+44/+29; bottom +42/+33/+22 vs +41/+31/+22), taking
-element-web to ≈0.5/luma and tagspaces to ≈1.6. The remaining glass gap is the
-per-layer drop shadow (KYA's cup on the background).
+element-web to ≈0.5/luma and tagspaces to ≈1.6.
+
+**Per-layer drop shadow — implemented.** A glass layer with `shadow:
+layer-color`/`neutral` casts a soft offset-down shadow on the background (KYA's
+cup, Rectangle's Overlay). Measured (`tools/probe_layer_shadow.py`) as a
+subtractive `(1−colour)` darkening — same form as the glass tint — peak ≈
+0.49·opacity (`layer-color`; ~0.10 for `neutral`), offset down ~12 px, blurred
+σ ≈ 17 px. `render_layer_stack` accumulates `shadow_dark[c] += strength·(1−col)·
+cov` per shadow-casting layer, offsets the buffer down, blurs it (three-box),
+and subtracts it from the background on pixels no layer covers. Matches Apple's
+profile (below −43/−38/−30/−20/−10 vs −45/−40/−32/−21/−11); KYA 9.1→7.3.
 
 This replaced an earlier coincidental full-multiply (`k=1`) that only fit
 Rectangle's dark background. The subtractive `D` reproduces Apple's tint at any

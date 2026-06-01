@@ -463,6 +463,16 @@ const GLASS_TINT_D: f32 = 63.5 / 255.0;
 /// widens the effective σ — tuned so our edge width matches Apple's ≈48 px.)
 const GLASS_BLUR_SIGMA: f32 = 18.0;
 
+/// Per-layer drop shadow (`shadow: layer-color`/`neutral`): a glass layer casts
+/// a soft shadow onto the background, offset down, tinted subtractively by
+/// `(1 − colour)` like the glass tint. Measured (`tools/probe_layer_shadow.py`):
+/// peak ≈ 0.35·opacity for `layer-color`, ~0.07·opacity for `neutral`; blurred
+/// (σ ≈ 16 px @ 1024) and offset down ≈ 9 px, all scaled to the rendition.
+const SHADOW_PEAK_LAYERCOLOR: f32 = 0.49;
+const SHADOW_PEAK_NEUTRAL: f32 = 0.10;
+const SHADOW_SIGMA: f32 = 17.0;
+const SHADOW_OFFSET_Y: f32 = 12.0;
+
 /// In-place separable blur of a straight-RGBA buffer (Gaussian approximated by
 /// three box passes), blurring in premultiplied space so transparent edges
 /// don't bleed dark. `sigma` is in pixels; a no-op below ~1 px.
@@ -557,6 +567,9 @@ struct StackLayer {
     /// Opaque glass with a specular sheen: keeps its colour but gets a raised
     /// rim highlight (KYA's coffee cup). `glass` + specular, translucency off.
     specular: bool,
+    /// Per-layer drop-shadow peak (0 = none) from the group's `shadow` kind ×
+    /// opacity: the layer casts a soft offset-down shadow on the background.
+    shadow_strength: f32,
     scale: f32,
     tx: f32,
     ty: f32,
@@ -629,6 +642,18 @@ fn collect_stack_layers(
             let tinted = frosted
                 && eff.shadow.kind == crate::icon_effects::ShadowKind::LayerColor;
             let specular = is_glass && !eff.translucency.enabled && eff.specular;
+            // A glass layer casts a per-layer drop shadow on the background when
+            // its group requests one; the peak scales with the shadow opacity.
+            use crate::icon_effects::ShadowKind;
+            let shadow_strength = if is_glass {
+                match eff.shadow.kind {
+                    ShadowKind::LayerColor => SHADOW_PEAK_LAYERCOLOR * eff.shadow.opacity,
+                    ShadowKind::Neutral => SHADOW_PEAK_NEUTRAL * eff.shadow.opacity,
+                    ShadowKind::None => 0.0,
+                }
+            } else {
+                0.0
+            };
             let (native_w, native_h) = layer_native_size(&path);
             // Compose group∘layer, then map to canvas pixels by the base scale.
             out.push(StackLayer {
@@ -636,6 +661,7 @@ fn collect_stack_layers(
                 frosted,
                 tinted,
                 specular,
+                shadow_strength,
                 scale: LAYER_BASE_SCALE * gscale * lscale,
                 tx: LAYER_BASE_SCALE * (gscale * ltx + gtx),
                 ty: LAYER_BASE_SCALE * (gscale * lty + gty),
@@ -800,6 +826,11 @@ fn render_layer_stack(
     let mut glass_sub = vec![[0.0f32; 3]; n];
     let mut glass_tinted = vec![false; n];
     let mut any_glass = false;
+    // Per-layer drop shadow: each shadow-casting layer adds a subtractive,
+    // `(1 − colour)`-tinted darkening at its coverage; the whole buffer is then
+    // offset down + blurred and laid on the background under the layers.
+    let mut shadow_dark = vec![[0.0f32; 3]; n];
+    let mut any_shadow = false;
     let f = pixel_size as f32 / 1024.0;
     for layer in layers {
         // Render at the layer's native aspect, scaled by base·group·layer (so a
@@ -830,6 +861,14 @@ fn render_layer_stack(
                     continue;
                 }
                 let ci = (cy * w as i64 + cx) as usize;
+                if layer.shadow_strength > 0.0 {
+                    any_shadow = true;
+                    let cov = sa as f32 / 255.0;
+                    for c in 0..3 {
+                        let col = src[si + c] as f32 / 255.0;
+                        shadow_dark[ci][c] += layer.shadow_strength * cov * (1.0 - col);
+                    }
+                }
                 if layer.frosted {
                     any_glass = true;
                     glass_cov[ci] = glass_cov[ci].max(sa);
@@ -925,6 +964,54 @@ fn render_layer_stack(
             let mut dst = [rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2], rgba[i * 4 + 3]];
             composite_blend(&mut dst, &g, BlendMode::Normal);
             rgba[i * 4..i * 4 + 4].copy_from_slice(&dst);
+        }
+    }
+    // Per-layer drop shadow: offset the accumulated darkening down, blur it, and
+    // subtract it from the background — but only on background pixels (where no
+    // layer/glass is already opaque), so the casting layer stays on top.
+    if any_shadow {
+        if let Some(g) = gradient {
+            let off = (SHADOW_OFFSET_Y * f).round() as usize;
+            let mut chans: [Vec<f32>; 3] =
+                [vec![0.0; n], vec![0.0; n], vec![0.0; n]];
+            for y in 0..w {
+                let sy = y.saturating_sub(off); // shift darkening downward
+                for x in 0..w {
+                    for c in 0..3 {
+                        chans[c][y * w + x] = shadow_dark[sy * w + x][c];
+                    }
+                }
+            }
+            let radius = (SHADOW_SIGMA * f).round() as usize;
+            if radius >= 1 {
+                let mut tmp = vec![0.0f32; n];
+                for c in &mut chans {
+                    for _ in 0..3 {
+                        box_blur_h(c, &mut tmp, w, radius);
+                        box_blur_v(c, &mut tmp, w, radius);
+                    }
+                }
+            }
+            for y in 0..w {
+                for x in 0..w {
+                    let i = y * w + x;
+                    if rgba[i * 4 + 3] >= 16 {
+                        continue; // a layer/glass already covers this pixel
+                    }
+                    let dark = [chans[0][i], chans[1][i], chans[2][i]];
+                    if dark[0] + dark[1] + dark[2] < 0.004 {
+                        continue;
+                    }
+                    let bg = g.sample(x as u32, y as u32, pixel_size);
+                    let mut out = [0u8; 4];
+                    for c in 0..3 {
+                        let v = (bg[c] as f32 - dark[c]).clamp(0.0, 1.0);
+                        out[c] = (v * 255.0).round() as u8;
+                    }
+                    out[3] = 255;
+                    rgba[i * 4..i * 4 + 4].copy_from_slice(&out);
+                }
+            }
         }
     }
     // Straight RGBA → premultiplied-first BGRA.
@@ -2412,7 +2499,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let red = dir.join("red.png");
         write_solid_png(&red, [255, 0, 0, 255]);
-        let layers = vec![StackLayer { source: red, frosted: true, tinted: false, specular: false, scale: 1.0, tx: 0.0, ty: 0.0, opacity: 1.0, blend: BlendMode::Normal, native_w: 64, native_h: 64 }];
+        let layers = vec![StackLayer { source: red, frosted: true, tinted: false, specular: false, shadow_strength: 0.0, scale: 1.0, tx: 0.0, ty: 0.0, opacity: 1.0, blend: BlendMode::Normal, native_w: 64, native_h: 64 }];
         let out = render_layer_stack(&layers, 64, None).unwrap();
         let i = (32 * 64 + 32) * 4; // centre, premul-first BGRA
         let (b, g, r, a) = (out[i], out[i + 1], out[i + 2], out[i + 3]);
@@ -2426,7 +2513,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let red = dir.join("red2.png");
         write_solid_png(&red, [255, 0, 0, 255]);
-        let layers = vec![StackLayer { source: red, frosted: false, tinted: false, specular: false, scale: 1.0, tx: 0.0, ty: 0.0, opacity: 1.0, blend: BlendMode::Normal, native_w: 64, native_h: 64 }];
+        let layers = vec![StackLayer { source: red, frosted: false, tinted: false, specular: false, shadow_strength: 0.0, scale: 1.0, tx: 0.0, ty: 0.0, opacity: 1.0, blend: BlendMode::Normal, native_w: 64, native_h: 64 }];
         let out = render_layer_stack(&layers, 64, None).unwrap();
         let i = (32 * 64 + 32) * 4; // premul-first BGRA, opaque red
         assert_eq!((out[i], out[i + 1], out[i + 2], out[i + 3]), (0, 0, 255, 255));
@@ -2458,6 +2545,7 @@ mod tests {
             frosted: true,
             tinted,
             specular: false,
+            shadow_strength: 0.0,
             scale: 1.0,
             tx: 0.0,
             ty: 0.0,
@@ -2503,6 +2591,7 @@ mod tests {
             frosted: false,
             tinted: false,
             specular: false,
+            shadow_strength: 0.0,
             scale: LAYER_BASE_SCALE,
             tx: 0.0,
             ty: 0.0,
