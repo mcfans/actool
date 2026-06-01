@@ -147,9 +147,14 @@ icon): our coffee cup matches Apple's — body lum 39 vs 45, rim-highlight peak
 > SVG by `target / native` (a no-op, hence byte-identical, when they already
 > match, as in the xcassets path). Mean diff over the KYA icon dropped 48 → 15.
 
-**Blur-material / lighting / per-region glass detail — not rendered.**
-Parameters resolved; these remain the proprietary shaders. See
-`docs/icon-bundle-parity.md`.
+**Blur-material / lighting — not rendered; per-region glass detail — measured
+negligible.** Parameters are resolved. Decoding Apple's scrumdinger GA8 shows
+the glass relief depends on input luminance by only ≈2/luma within a fixed
+y-band, so "per-region glass detail" is not a real gap — the residual is
+edge anti-aliasing. blur-material and lighting are group properties with no
+fixture that exercises them measurably (smooth backdrops / blank-layer feishin),
+and need a per-group compositing refactor first. Full analysis + implementation
+plan in `docs/icon-shading-plan.md`.
 
 **Per-layer fill gradients (multi-group palette).** A multi-group icon's layers
 can each declare their own `fill-specializations` linear-gradients (transmission's
