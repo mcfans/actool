@@ -69,6 +69,18 @@ public. The parsed parameters let us approximate:
 
 `icon_effects.rs` resolves all of the above into typed per-appearance values
 (unit-tested against feishin's specialization forms and element-web's plain
-fields). The render pass is not wired yet — the drop shadow is fully specified
-here; glass/specular/blur remain approximations pending controlled fixtures.
-See `docs/icon-bundle-parity.md` for the overall rendering status.
+fields).
+
+**Drop shadow — implemented.** `icon_render::composite_icon` takes a
+`ShadowParams` and casts it from the squircle before clipping (`icon_bundle`
+derives it per variant via `shadow_params`). The rendered halo matches Apple's
+feishin output within Gaussian tolerance (sides 34/22/14/7 vs Apple
+25/18/12/7 at 5px steps; ≈35px reach). `kind: none` skips it; neutral and
+layer-color are both approximated as black.
+
+**Glass / specular / translucency / blur — not rendered yet.** Their parameters
+are resolved and ready, but none of the current fixtures exercise them visibly
+(feishin's layer is blank; element-web disables them; variant-axis bundles are
+recomposed by CUICatalog so their sized rendition isn't shown directly), so
+there is no ground truth to tune against. They need a fixture with a visible
+glass/specular layer before implementing. See `docs/icon-bundle-parity.md`.

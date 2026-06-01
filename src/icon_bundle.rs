@@ -286,6 +286,7 @@ pub fn compile_icon_bundle(
         &group_facet_names,
         &color_assets,
         &gradient_assets,
+        parsed.groups.first(),
         emit_variant_axis,
         platform,
         min_deploy,
@@ -447,6 +448,7 @@ fn build_icon_car(
     group_facet_names: &[String],
     color_assets: &[ColorAsset],
     gradient_assets: &[GradientAsset],
+    group: Option<&crate::icon_json::Group>,
     emit_variant_axis: bool,
     platform: &str,
     min_deploy: &str,
@@ -475,6 +477,12 @@ fn build_icon_car(
         .get(1)
         .and_then(|g| resolve_gradient_fill(g, color_assets));
 
+    // Drop shadow, resolved per appearance from the group's effect
+    // specializations (primary variant → light, alternate → dark).
+    use crate::icon_effects::{resolve_icon_effects, Appearance};
+    let light_shadow = group.map(|g| resolve_icon_effects(g, Appearance::Light).shadow);
+    let dark_shadow = group.map(|g| resolve_icon_effects(g, Appearance::Dark).shadow);
+
     // Split images into atlas candidates (small sizes) and inline (large).
     // For each size load BGRA pixels, then dispatch by point size. When
     // `emit_variant_axis` is set, every sized rendition is duplicated for
@@ -496,9 +504,18 @@ fn build_icon_car(
             } else {
                 light_fill.as_ref()
             };
+            let shadow = shadow_params(
+                if variant == 1 { dark_shadow } else { light_shadow },
+                *pixel_size,
+            );
             let composited = match fill {
-                Some(f) => crate::icon_render::composite_icon(*pixel_size, f, &layer_bgra)
-                    .unwrap_or_else(|| layer_bgra.clone()),
+                Some(f) => crate::icon_render::composite_icon(
+                    *pixel_size,
+                    f,
+                    &layer_bgra,
+                    shadow.as_ref(),
+                )
+                .unwrap_or_else(|| layer_bgra.clone()),
                 None => layer_bgra.clone(),
             };
             // With the variant axis the composite is stored as a grayscale
@@ -977,6 +994,29 @@ fn color_to_rgb(c: &ColorAsset) -> [f64; 3] {
         [r, g, b, _a] => [*r, *g, *b],
         _ => [0.0, 0.0, 0.0],
     }
+}
+
+/// Build per-size CoreGraphics drop-shadow parameters from a resolved
+/// `ShadowSpec`. `None` when there is no shadow. The colour alpha is set so
+/// that, once Gaussian-blurred over the squircle edge, the halo peaks near the
+/// measured `PEAK_ALPHA`; neutral and layer-color shadows are both approximated
+/// as black (dark-mode backgrounds make the distinction negligible).
+fn shadow_params(
+    spec: Option<crate::icon_effects::ShadowSpec>,
+    pixel_size: u32,
+) -> Option<crate::icon_render::ShadowParams> {
+    use crate::icon_effects::shadow_geometry::{BLUR_RATIO, OFFSET_Y_RATIO, PEAK_ALPHA};
+    use crate::icon_effects::ShadowKind;
+    let spec = spec?;
+    if spec.kind == ShadowKind::None || spec.opacity <= 0.0 {
+        return None;
+    }
+    let alpha = (2.0 * PEAK_ALPHA * spec.opacity as f64).min(1.0);
+    Some(crate::icon_render::ShadowParams {
+        color: [0.0, 0.0, 0.0, alpha],
+        blur: pixel_size as f64 * BLUR_RATIO,
+        offset: [0.0, pixel_size as f64 * OFFSET_Y_RATIO],
+    })
 }
 
 /// Resolve a GradientAsset into a renderable background fill, looking up each

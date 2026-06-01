@@ -67,6 +67,9 @@ type FnImageCreate = unsafe extern "C" fn(
     u32,
 ) -> *mut c_void;
 type FnDrawImage = unsafe extern "C" fn(*mut c_void, CGRect, *mut c_void);
+type FnColorCreate = unsafe extern "C" fn(*mut c_void, *const c_double) -> *mut c_void;
+type FnSetShadow = unsafe extern "C" fn(*mut c_void, CGSize, c_double, *mut c_void);
+type FnSetRgbFill = unsafe extern "C" fn(*mut c_void, c_double, c_double, c_double, c_double);
 type FnRelease = unsafe extern "C" fn(*mut c_void);
 
 struct Syms {
@@ -78,15 +81,20 @@ struct Syms {
     ctx_clip: FnCtx,
     ctx_save: FnCtx,
     ctx_restore: FnCtx,
+    ctx_fill_path: FnCtx,
     grad_create: FnGradCreate,
     draw_linear: FnDrawLinear,
     provider_create: FnProviderCreate,
     image_create: FnImageCreate,
     draw_image: FnDrawImage,
+    color_create: FnColorCreate,
+    set_shadow: FnSetShadow,
+    set_rgb_fill: FnSetRgbFill,
     path_release: FnRelease,
     grad_release: FnRelease,
     provider_release: FnRelease,
     image_release: FnRelease,
+    color_release: FnRelease,
     ctx_release: FnRelease,
     cs_release: FnRelease,
 }
@@ -125,15 +133,20 @@ fn syms() -> Option<&'static Syms> {
             ctx_clip: sym!("CGContextClip", FnCtx),
             ctx_save: sym!("CGContextSaveGState", FnCtx),
             ctx_restore: sym!("CGContextRestoreGState", FnCtx),
+            ctx_fill_path: sym!("CGContextFillPath", FnCtx),
             grad_create: sym!("CGGradientCreateWithColorComponents", FnGradCreate),
             draw_linear: sym!("CGContextDrawLinearGradient", FnDrawLinear),
             provider_create: sym!("CGDataProviderCreateWithData", FnProviderCreate),
             image_create: sym!("CGImageCreate", FnImageCreate),
             draw_image: sym!("CGContextDrawImage", FnDrawImage),
+            color_create: sym!("CGColorCreate", FnColorCreate),
+            set_shadow: sym!("CGContextSetShadowWithColor", FnSetShadow),
+            set_rgb_fill: sym!("CGContextSetRGBFillColor", FnSetRgbFill),
             path_release: sym!("CGPathRelease", FnRelease),
             grad_release: sym!("CGGradientRelease", FnRelease),
             provider_release: sym!("CGDataProviderRelease", FnRelease),
             image_release: sym!("CGImageRelease", FnRelease),
+            color_release: sym!("CGColorRelease", FnRelease),
             ctx_release: sym!("CGContextRelease", FnRelease),
             cs_release: sym!("CGColorSpaceRelease", FnRelease),
         })
@@ -156,19 +169,32 @@ pub struct GradientFill {
     pub stop: [f32; 2],
 }
 
+/// A drop shadow cast by the icon squircle. Drawn before the icon is clipped,
+/// so it bleeds into the surrounding margin. See `icon_effects::shadow_geometry`
+/// for the measured defaults.
+pub struct ShadowParams {
+    /// Straight (non-premultiplied) device-RGB colour + alpha.
+    pub color: [f64; 4],
+    /// Gaussian blur radius, pixels.
+    pub blur: f64,
+    /// Offset in pixels `(x, y)`; positive `y` is downward on screen.
+    pub offset: [f64; 2],
+}
+
 /// Icon-shape geometry as a fraction of the canvas edge, measured from Apple's
 /// 1024px output: 100px inset, 220px corner radius.
 const MARGIN_RATIO: f64 = 100.0 / 1024.0;
 const CORNER_RATIO: f64 = 220.0 / 1024.0;
 
 /// Composite a sized rendition: the gradient background and the supplied layer
-/// (canvas-sized premultiplied-first BGRA), both clipped to the icon squircle.
-/// Returns premultiplied-first BGRA of `pixel_size²`, or `None` if CoreGraphics
-/// is unavailable.
+/// (canvas-sized premultiplied-first BGRA), both clipped to the icon squircle,
+/// optionally preceded by a drop shadow. Returns premultiplied-first BGRA of
+/// `pixel_size²`, or `None` if CoreGraphics is unavailable.
 pub fn composite_icon(
     pixel_size: u32,
     gradient: &GradientFill,
     layer_bgra: &[u8],
+    shadow: Option<&ShadowParams>,
 ) -> Option<Vec<u8>> {
     let s = syms()?;
     let size = pixel_size as usize;
@@ -198,12 +224,30 @@ pub fn composite_icon(
             return None;
         }
 
-        // Clip everything to the rounded-rect icon shape.
         let rect = CGRect {
             origin: CGPoint { x: margin, y: margin },
             size: CGSize { width: content, height: content },
         };
         let path = (s.path_rounded)(rect, corner, corner, std::ptr::null());
+
+        // Drop shadow: fill the squircle opaque with the shadow set, so the
+        // blurred copy bleeds into the margin. The opaque fill inside is then
+        // overpainted by the gradient. Done before clipping (the shadow lives
+        // outside the shape).
+        if let Some(sh) = shadow {
+            (s.ctx_save)(ctx);
+            let color = (s.color_create)(cs, sh.color.as_ptr());
+            // Context is bottom-up, so a downward screen offset is negative y.
+            let off = CGSize { width: sh.offset[0], height: -sh.offset[1] };
+            (s.set_shadow)(ctx, off, sh.blur, color);
+            (s.set_rgb_fill)(ctx, 1.0, 1.0, 1.0, 1.0);
+            (s.ctx_add_path)(ctx, path);
+            (s.ctx_fill_path)(ctx);
+            (s.color_release)(color);
+            (s.ctx_restore)(ctx);
+        }
+
+        // Clip everything else to the rounded-rect icon shape.
         (s.ctx_add_path)(ctx, path);
         (s.ctx_clip)(ctx);
 
@@ -288,7 +332,7 @@ mod tests {
             start: [0.5, 0.0],
             stop: [0.5, 1.0],
         };
-        let Some(out) = composite_icon(size, &fill, &layer) else {
+        let Some(out) = composite_icon(size, &fill, &layer, None) else {
             // CoreGraphics unavailable (non-macOS CI) — nothing to assert.
             return;
         };

@@ -259,15 +259,18 @@ pub fn resolve_icon_effects(group: &Group, appearance: Appearance) -> IconEffect
     }
 }
 
-/// Icon-frame drop-shadow geometry, as a fraction of the canvas edge, measured
-/// from Apple's 1024px feishin output. The shadow is a blurred black copy of
-/// the squircle, nudged downward; `opacity` from [`ShadowSpec`] scales it.
+/// Icon-frame drop-shadow geometry, as a fraction of the canvas edge, tuned so
+/// the CoreGraphics-rendered halo matches Apple's 1024px feishin output. The
+/// shadow is a blurred black copy of the squircle, nudged downward; `opacity`
+/// from [`ShadowSpec`] scales it.
 pub mod shadow_geometry {
-    /// Gaussian blur radius (≈20px at 1024).
-    pub const BLUR_RATIO: f64 = 20.0 / 1024.0;
+    /// `CGContextSetShadowWithColor` blur radius (≈32px at 1024 — larger than
+    /// the measured ~20px sigma to match the rendered falloff to ~35px out).
+    pub const BLUR_RATIO: f64 = 32.0 / 1024.0;
     /// Downward offset (the bottom halo is heavier than the top).
-    pub const OFFSET_Y_RATIO: f64 = 8.0 / 1024.0;
-    /// Peak alpha just outside the squircle edge at `opacity = 1`.
+    pub const OFFSET_Y_RATIO: f64 = 6.0 / 1024.0;
+    /// Shadow-colour alpha at `opacity = 1`; blurs down to a measured edge peak
+    /// of ≈0.17.
     pub const PEAK_ALPHA: f64 = 0.17;
 }
 
