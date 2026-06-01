@@ -259,19 +259,21 @@ pub fn resolve_icon_effects(group: &Group, appearance: Appearance) -> IconEffect
     }
 }
 
-/// Icon-frame drop-shadow geometry, as a fraction of the canvas edge, tuned so
-/// the CoreGraphics-rendered halo matches Apple's 1024px feishin output. The
-/// shadow is a blurred black copy of the squircle, nudged downward; `opacity`
-/// from [`ShadowSpec`] scales it.
+/// Icon-frame drop-shadow geometry, as a fraction of the canvas edge. The icon
+/// tile always casts this constant halo (a blurred black copy of the squircle,
+/// nudged downward) regardless of the group `shadow` kind — Apple's halo is the
+/// same for `shadow: none`, absent, or `layer-color`. Tuned to Apple's measured
+/// α profile (`tools/probe_margin_shadow.py`): top 16/11/6, bottom 37/31/22/12
+/// at 4/8/14/22 px out.
 pub mod shadow_geometry {
-    /// `CGContextSetShadowWithColor` blur radius (≈32px at 1024 — larger than
-    /// the measured ~20px sigma to match the rendered falloff to ~35px out).
-    pub const BLUR_RATIO: f64 = 32.0 / 1024.0;
+    /// `CGContextSetShadowWithColor` blur radius. Tuned so the rendered halo's
+    /// falloff matches Apple's (reaching ~45px out, top/bottom α profile).
+    pub const BLUR_RATIO: f64 = 34.0 / 1024.0;
     /// Downward offset (the bottom halo is heavier than the top).
-    pub const OFFSET_Y_RATIO: f64 = 6.0 / 1024.0;
-    /// Shadow-colour alpha at `opacity = 1`; blurs down to a measured edge peak
-    /// of ≈0.17.
-    pub const PEAK_ALPHA: f64 = 0.17;
+    pub const OFFSET_Y_RATIO: f64 = 9.0 / 1024.0;
+    /// Shadow-colour alpha at `opacity = 1`; blurs down to the measured edge
+    /// peaks (bottom α ≈37, top ≈16 at opacity 0.5).
+    pub const PEAK_ALPHA: f64 = 0.245;
 }
 
 #[cfg(test)]

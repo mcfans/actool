@@ -1095,20 +1095,17 @@ fn build_icon_car(
     // renditions with libdm2's KCBC path). With no fill we fall back to the raw
     // layer.
 
-    // Drop shadow, resolved per appearance from the effect specializations
-    // (primary variant → light, alternate → dark). The icon's single drop
-    // shadow comes from the first group that requests one — a back group with
-    // `shadow: none` (Rectangle's Dots) must not suppress a front group's
-    // `layer-color` shadow (Overlay). Single-group icons are unaffected.
-    use crate::icon_effects::{resolve_icon_effects, Appearance, ShadowKind};
-    let group_shadow = |ap: Appearance| {
-        groups
-            .iter()
-            .map(|g| resolve_icon_effects(g, ap).shadow)
-            .find(|s| s.kind != ShadowKind::None && s.opacity > 0.0)
-    };
-    let light_shadow = group_shadow(Appearance::Light);
-    let dark_shadow = group_shadow(Appearance::Dark);
+    // The icon tile ALWAYS casts a constant margin drop shadow, independent of
+    // the group `shadow` kind: Apple casts the same halo for `shadow: none`
+    // (element-web) and an absent shadow (feishin) as for `layer-color` (KYA) —
+    // all measure BOT α ≈37. (The group shadow drives the *per-layer* shadow
+    // instead, in `render_layer_stack`.) A fixed neutral spec at opacity 0.5
+    // reproduces Apple's halo (`shadow_geometry` tuned to it).
+    use crate::icon_effects::{ShadowKind, ShadowSpec};
+    let _ = groups;
+    let icon_shadow = Some(ShadowSpec { kind: ShadowKind::Neutral, opacity: 0.5 });
+    let light_shadow = icon_shadow;
+    let dark_shadow = icon_shadow;
 
     // Split images into atlas candidates (small sizes) and inline (large).
     // For each size load BGRA pixels, then dispatch by point size. When

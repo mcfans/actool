@@ -131,8 +131,16 @@ form as the glass tint), peak ≈ 0.49·opacity (`layer-color`; ~0.10 for
 accumulates it per layer, offsets + blurs, and subtracts it from the background
 under the layers; our profile matches Apple's (below −43/−38/−30/−20/−10 vs
 −45/−40/−32/−21/−11; above −14/−10/−6 vs −13/−9/−5). KYA's mean diff dropped
-9.1→7.3. The squircle's drop shadow into the margin is still slightly weaker
-than Apple's.
+9.1→7.3.
+
+The **icon-frame margin drop shadow** is now cast **always**, at constant
+strength, independent of the group `shadow` kind — Apple's halo is identical for
+`shadow: none` (element-web), absent (feishin), and `layer-color` (KYA), all
+≈ bottom α 37. Previously we gated it on the group shadow, so element-web and
+feishin had no margin shadow at all. Tuned to Apple's α profile (top 16/11/6,
+bottom 37/31/22/12 at 4/8/14/22 px; ours top 14/9/5, bottom 37/32/23/12).
+(Variant-axis icons like feishin bake it into the GA8; CUICatalog's recompose
+differs — a separate documented limitation.)
 The background gradient now matches to ≈1/luma: a black→white probe
 (`tools/probe_gradient_space.py`) showed Apple interpolates in the **same**
 component-linear space we do — the old "device-RGB vs Apple's space" residual was
