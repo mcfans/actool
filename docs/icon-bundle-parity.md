@@ -109,12 +109,17 @@ glass shading (≈30/channel average; the shape and gradient are right). Before
 this, sized renditions were the raw layer on a full square; now non-variant
 `.icon` bundles render as proper macOS squircle icons.
 
-Not reproduced: the drop shadow and the opaque-glass specular highlight. (The
-frosted-glass tint *and* the "raised glass" soft edge **are** reproduced — the
-tint is a measured subtractive `D·(1−colour)` and the raised look is a measured
-σ≈19 px edge blur; see `icon-shading.md`. Layer inset/scale is also reproduced —
-the fixed `824/1024` placement is verified pixel-exact by the marker sweep; an
-earlier "Apple insets the layer slightly" suspicion was a measurement artifact.)
+Not reproduced: the icon-frame **glass-tile lighting** (a bright top inner-edge
+highlight + a broad bottom inner shading). **Opaque-glass `specular` is NOT a
+gap — it is a static no-op**: a probe showed `specular: true` vs `false` are
+byte-identical (it's a live-render hint, like `lighting`), so the old
+`apply_specular` (a bright edge rim) was wrong and was removed — KYA's mean diff
+dropped 15.1→9.0. The frosted-glass tint *and* the "raised glass" soft edge
+**are** reproduced — the tint is a measured subtractive `D·(1−colour)` and the
+raised look is a measured σ≈19 px edge blur; see `icon-shading.md`. Layer
+inset/scale is also reproduced — the fixed `824/1024` placement is verified
+pixel-exact by the marker sweep; an earlier "Apple insets the layer slightly"
+suspicion was a measurement artifact.)
 The background gradient now matches to ≈1/luma: a black→white probe
 (`tools/probe_gradient_space.py`) showed Apple interpolates in the **same**
 component-linear space we do — the old "device-RGB vs Apple's space" residual was

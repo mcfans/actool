@@ -799,9 +799,7 @@ fn render_layer_stack(
     // neutral relief darkening.
     let mut glass_sub = vec![[0.0f32; 3]; n];
     let mut glass_tinted = vec![false; n];
-    let mut spec_cov = vec![0u8; n];
     let mut any_glass = false;
-    let mut any_specular = false;
     let f = pixel_size as f32 / 1024.0;
     for layer in layers {
         // Render at the layer's native aspect, scaled by base·group·layer (so a
@@ -861,10 +859,6 @@ fn render_layer_stack(
                     };
                     composite_blend(&mut dst, &s, layer.blend);
                     rgba[ci * 4..ci * 4 + 4].copy_from_slice(&dst);
-                    if layer.specular {
-                        any_specular = true;
-                        spec_cov[ci] = spec_cov[ci].max(sa);
-                    }
                 }
             }
         }
@@ -933,9 +927,6 @@ fn render_layer_stack(
             rgba[i * 4..i * 4 + 4].copy_from_slice(&dst);
         }
     }
-    if any_specular {
-        apply_specular(&mut rgba, &spec_cov, w);
-    }
     // Straight RGBA → premultiplied-first BGRA.
     let mut out = vec![0u8; n * 4];
     for i in 0..n {
@@ -947,42 +938,6 @@ fn render_layer_stack(
         out[i * 4 + 3] = a;
     }
     Ok(out)
-}
-
-/// Add a directional specular sheen to opaque-glass coverage `cov`: top-facing
-/// edges get a soft white highlight, bottom-facing edges a slight shadow — the
-/// raised "liquid glass" rim (KYA's cup). Light comes from the top, so the sign
-/// of the vertical coverage gradient picks highlight vs shadow.
-fn apply_specular(rgba: &mut [u8], cov: &[u8], w: usize) {
-    let d = ((w as f32 * 22.0 / 1024.0).round() as i64).max(1);
-    const HI: f32 = 0.55;
-    const LO: f32 = 0.30;
-    let wi = w as i64;
-    for y in 0..wi {
-        for x in 0..wi {
-            let i = (y * wi + x) as usize;
-            if cov[i] == 0 {
-                continue;
-            }
-            let at = |yy: i64| {
-                if yy >= 0 && yy < wi {
-                    cov[(yy * wi + x) as usize] as f32 / 255.0
-                } else {
-                    0.0
-                }
-            };
-            // >0 where coverage is heavier below than above → a top-facing edge.
-            let g = at(y + d) - at(y - d);
-            if g.abs() < 0.02 {
-                continue;
-            }
-            let delta = g * if g > 0.0 { HI } else { LO } * 255.0;
-            for c in 0..3 {
-                let v = rgba[i * 4 + c] as f32 + delta;
-                rgba[i * 4 + c] = v.round().clamp(0.0, 255.0) as u8;
-            }
-        }
-    }
 }
 
 fn find_all_source_images(bundle: &Path, json: &serde_json::Value) -> Vec<PathBuf> {
@@ -2436,27 +2391,6 @@ mod tests {
         let c = pre_rendered_name("Icon", 64, 2, "NSAppearanceNameSystem");
         assert_ne!(a, b);
         assert_ne!(b, c);
-    }
-
-    #[test]
-    fn specular_brightens_top_edge_darkens_bottom() {
-        // A mid-grey filled band: its top edge should brighten, bottom darken.
-        let w = 128;
-        let mut rgba = vec![100u8; w * w * 4];
-        let mut cov = vec![0u8; w * w];
-        for y in 40..88 {
-            for x in 20..108 {
-                cov[y * w + x] = 255;
-                for c in 0..4 {
-                    rgba[(y * w + x) * 4 + c] = if c == 3 { 255 } else { 100 };
-                }
-            }
-        }
-        apply_specular(&mut rgba, &cov, w);
-        let lum = |y: usize| rgba[(y * w + 64) * 4] as i32; // centre column
-        // The emboss acts within a few px of each horizontal boundary.
-        assert!(lum(41) > 130, "top edge should brighten, got {}", lum(41));
-        assert!(lum(86) < 80, "bottom edge should darken, got {}", lum(86));
     }
 
     fn palette(json: &str) -> (Vec<ColorAsset>, Vec<GradientAsset>) {

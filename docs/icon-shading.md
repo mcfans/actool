@@ -115,8 +115,16 @@ both gave a ~48 px 10→90 % edge). `render_layer_stack` builds the glass result
 into its own buffer and blurs it (a three-box separable approximation in
 premultiplied space, σ scaled to the rendition) before compositing — our edge
 width lands 49 px vs Apple's 48. This softens Rectangle's blue/grey divider and
-scrumdinger's ghostly timer to match Apple; opaque glass keeps its existing
-specular rim (the one case with a real edge bevel: a dark bottom/right rim).
+scrumdinger's ghostly timer to match Apple.
+
+**Opaque-glass `specular` is a static no-op — removed.** A probe over a glass
+shape showed `specular: true` and `false` produce byte-identical renditions (it
+only affects live device-motion sheen, like `lighting`). The old `apply_specular`
+added a bright top-edge rim that Apple does not — it was actively wrong (KYA's
+cup gained a bright band). Removing it dropped KYA's mean diff 15.1→9.0; the cup
+keeps its `GLASS_FLOOR` lift (`#000000`→45, matching Apple) and is otherwise flat.
+The bottom-right dark rim seen on opaque glass is the group's `shadow:
+layer-color` (a per-layer drop shadow), not specular.
 
 This replaced an earlier coincidental full-multiply (`k=1`) that only fit
 Rectangle's dark background. The subtractive `D` reproduces Apple's tint at any
@@ -191,17 +199,14 @@ opacity scales the source alpha. Because blend modes differ between appearances
 rendered **per appearance** — the primary variant uses the light stack, the
 alternate the dark one. Glass layers ignore blend/opacity (they become relief).
 
-**Translucency gates the glass mode; specular — implemented.** A glass layer is
-*frosted* (the faint see-through relief) only when translucency is **enabled**
-(scrumdinger). With translucency **disabled** it is **opaque** glass: the layer
-keeps its colour (blacks lifted toward a grey floor ≈45/255 — the glass
-material) and, when the group's `specular` is on, gets a directional sheen —
-`apply_specular` brightens top-facing edges of the layer and shadows
-bottom-facing ones (light from the top), the raised "liquid glass" rim.
-Reverse-engineered against KeepingYouAwake (a non-variant `specular: true` glass
-icon): our coffee cup matches Apple's — body lum 39 vs 45, rim-highlight peak
-209 vs 209, cup centre (549,533) vs (550,524) once the SVG scaling was fixed
-(below). feishin's specular is `tinted`-only, so it stays unrendered there.
+**Translucency gates the glass mode.** A glass layer is *frosted* (the faint
+see-through relief) only when translucency is **enabled** (scrumdinger). With
+translucency **disabled** it is **opaque** glass: the layer keeps its colour,
+with blacks lifted toward a grey floor ≈45/255 — the glass material
+(KeepingYouAwake's cup: `#000000` source → 45, matching Apple). The group's
+`specular` flag adds **no** static treatment (see the no-op note above), so the
+opaque layer is otherwise flat — Apple's cup is uniform 45 in its body with no
+rim.
 
 > SVG layers are scaled to fit their target size. `svg_raster::rasterize_svg`
 > used to draw the SVG at its intrinsic size and only apply an integer scale, so
