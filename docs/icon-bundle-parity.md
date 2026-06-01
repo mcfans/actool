@@ -109,12 +109,14 @@ glass shading (≈30/channel average; the shape and gradient are right). Before
 this, sized renditions were the raw layer on a full square; now non-variant
 `.icon` bundles render as proper macOS squircle icons.
 
-Not reproduced: the drop shadow, specular highlight, and the layer's raised
-glass shading. (Layer inset/scale **is** reproduced — the fixed `824/1024`
-placement is verified pixel-exact by the marker sweep; an earlier "Apple insets
-the layer slightly" suspicion was a measurement artifact.) The gradient stops
-are interpolated in device-RGB rather than Apple's space, leaving a residual
-≈6/luma curve difference across the gradient.
+Not reproduced: the drop shadow and the opaque-glass specular highlight. (The
+frosted-glass tint *and* the "raised glass" soft edge **are** reproduced — the
+tint is a measured subtractive `D·(1−colour)` and the raised look is a measured
+σ≈19 px edge blur; see `icon-shading.md`. Layer inset/scale is also reproduced —
+the fixed `824/1024` placement is verified pixel-exact by the marker sweep; an
+earlier "Apple insets the layer slightly" suspicion was a measurement artifact.)
+The gradient stops are interpolated in device-RGB rather than Apple's space,
+leaving a residual ≈6/luma curve difference across the gradient.
 
 **Variant-axis bundles** (top-level `fill-specializations`, e.g. feishin /
 scrumdinger) store the *same* composite, just as grayscale: primary variant →

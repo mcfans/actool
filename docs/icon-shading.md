@@ -106,6 +106,18 @@ untinted frosted layer instead contributes the faint vertical relief darkening
 (≈`bg`), and an icon with no top-level gradient (scrumdinger's `fill: None`)
 hits the neutral-relief fallback byte-identically.
 
+**Raised glass relief — implemented as a soft edge blur.** An edge-profile probe
+(`tools/probe_glass_relief.py`: a glass circle over a flat background, scanned
+across its edge) showed the "raised glass" look is **not** an emboss/bevel — the
+transition is monotonic with no bright/dark rim. It is a Gaussian feather of the
+glass contribution, **σ ≈ 19 px at 1024, size-independent** (R=320 and R=160
+both gave a ~48 px 10→90 % edge). `render_layer_stack` builds the glass result
+into its own buffer and blurs it (a three-box separable approximation in
+premultiplied space, σ scaled to the rendition) before compositing — our edge
+width lands 49 px vs Apple's 48. This softens Rectangle's blue/grey divider and
+scrumdinger's ghostly timer to match Apple; opaque glass keeps its existing
+specular rim (the one case with a real edge bevel: a dark bottom/right rim).
+
 This replaced an earlier coincidental full-multiply (`k=1`) that only fit
 Rectangle's dark background. The subtractive `D` reproduces Apple's tint at any
 background automatically: Rectangle's right-mid lands `[15,66,103]` vs Apple

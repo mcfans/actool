@@ -455,6 +455,91 @@ const GLASS_FLOOR: f32 = 45.0 / 255.0;
 /// subtraction additively.
 const GLASS_TINT_D: f32 = 63.5 / 255.0;
 
+/// The "raised glass" look is a soft blur of the glass contribution's edges —
+/// not an emboss/bevel (an edge-profile probe found a monotonic transition with
+/// no rim). The feather is a Gaussian of σ ≈ 19 px at 1024, measured
+/// size-independent (`tools/probe_glass_relief.py`), so it scales with the
+/// rendition. (18 rather than 19 since the three-box approximation slightly
+/// widens the effective σ — tuned so our edge width matches Apple's ≈48 px.)
+const GLASS_BLUR_SIGMA: f32 = 18.0;
+
+/// In-place separable blur of a straight-RGBA buffer (Gaussian approximated by
+/// three box passes), blurring in premultiplied space so transparent edges
+/// don't bleed dark. `sigma` is in pixels; a no-op below ~1 px.
+fn blur_rgba_premul(buf: &mut [u8], w: usize, sigma: f32) {
+    let radius = sigma.round() as usize;
+    if radius < 1 {
+        return;
+    }
+    let n = w * w;
+    // Straight RGBA → premultiplied f32 channels.
+    let mut ch: [Vec<f32>; 4] =
+        [vec![0.0; n], vec![0.0; n], vec![0.0; n], vec![0.0; n]];
+    for i in 0..n {
+        let a = buf[i * 4 + 3] as f32 / 255.0;
+        for c in 0..3 {
+            ch[c][i] = (buf[i * 4 + c] as f32 / 255.0) * a;
+        }
+        ch[3][i] = a;
+    }
+    let mut tmp = vec![0.0f32; n];
+    for c in &mut ch {
+        for _ in 0..3 {
+            box_blur_h(c, &mut tmp, w, radius);
+            box_blur_v(c, &mut tmp, w, radius);
+        }
+    }
+    // Premultiplied f32 → straight RGBA u8.
+    for i in 0..n {
+        let a = ch[3][i].clamp(0.0, 1.0);
+        for c in 0..3 {
+            let v = if a > 0.0004 { (ch[c][i] / a).clamp(0.0, 1.0) } else { 0.0 };
+            buf[i * 4 + c] = (v * 255.0).round() as u8;
+        }
+        buf[i * 4 + 3] = (a * 255.0).round() as u8;
+    }
+}
+
+/// One horizontal box-blur pass (radius `r`, edge-clamped), `src` → `src` via
+/// scratch `tmp`, using a running sum for O(n).
+fn box_blur_h(src: &mut [f32], tmp: &mut [f32], w: usize, r: usize) {
+    let win = (2 * r + 1) as f32;
+    for y in 0..w {
+        let row = y * w;
+        let mut sum = 0.0;
+        for k in 0..=r {
+            sum += src[row + k.min(w - 1)];
+        }
+        sum += src[row] * r as f32; // left edge clamp
+        for x in 0..w {
+            tmp[row + x] = sum / win;
+            let add = (x + r + 1).min(w - 1);
+            let sub = if x >= r { x - r } else { 0 };
+            sum += src[row + add] - src[row + sub];
+        }
+    }
+    src.copy_from_slice(tmp);
+}
+
+/// One vertical box-blur pass (radius `r`, edge-clamped).
+fn box_blur_v(src: &mut [f32], tmp: &mut [f32], w: usize, r: usize) {
+    let win = (2 * r + 1) as f32;
+    for x in 0..w {
+        let mut sum = 0.0;
+        for k in 0..=r {
+            sum += src[k.min(w - 1) * w + x];
+        }
+        sum += src[x] * r as f32;
+        for y in 0..w {
+            tmp[y * w + x] = sum / win;
+            let add = (y + r + 1).min(w - 1);
+            let sub = if y >= r { y - r } else { 0 };
+            sum += src[add * w + x] - src[sub * w + x];
+        }
+    }
+    src.copy_from_slice(tmp);
+}
+
 /// One layer in render order: its rasterizable source, glass flag, and the
 /// affine placement (scale + translation in 1024-canvas pixels) resolved from
 /// the group and layer `position`.
@@ -785,6 +870,10 @@ fn render_layer_stack(
         }
     }
     if any_glass {
+        // Build the glass contribution as its own straight-RGBA buffer, then
+        // blur its edges (the soft "raised glass" look) before compositing it
+        // over the layers.
+        let mut glass_buf = vec![0u8; n * 4];
         for y in 0..w {
             // The glass itself only darkens the layer a few percent; the
             // vertical relief the eye sees is mostly the background gradient
@@ -823,10 +912,25 @@ fn render_layer_stack(
                     // No gradient (raw-layer fallback): keep the neutral relief.
                     None => [0, 0, 0, (cov * strength * 255.0).round() as u8],
                 };
-                let mut dst = [rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2], rgba[i * 4 + 3]];
-                composite_blend(&mut dst, &glass_px, BlendMode::Normal);
-                rgba[i * 4..i * 4 + 4].copy_from_slice(&dst);
+                glass_buf[i * 4..i * 4 + 4].copy_from_slice(&glass_px);
             }
+        }
+        // Soft glass edge: feather by σ ≈ 19 px at 1024, scaled to this size.
+        let sigma = GLASS_BLUR_SIGMA * pixel_size as f32 / 1024.0;
+        blur_rgba_premul(&mut glass_buf, w, sigma);
+        for i in 0..n {
+            if glass_buf[i * 4 + 3] == 0 {
+                continue;
+            }
+            let g = [
+                glass_buf[i * 4],
+                glass_buf[i * 4 + 1],
+                glass_buf[i * 4 + 2],
+                glass_buf[i * 4 + 3],
+            ];
+            let mut dst = [rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2], rgba[i * 4 + 3]];
+            composite_blend(&mut dst, &g, BlendMode::Normal);
+            rgba[i * 4..i * 4 + 4].copy_from_slice(&dst);
         }
     }
     if any_specular {
@@ -2406,6 +2510,8 @@ mod tests {
             start: [0.5, 0.0],
             stop: [0.5, 1.0],
         };
+        // Full-canvas glass (native 1024 at scale 1) so the sampled centre is
+        // deep interior — past the soft edge blur — and reflects the pure tint.
         let mk = |src: &Path, tinted: bool| StackLayer {
             source: src.to_path_buf(),
             frosted: true,
@@ -2416,26 +2522,26 @@ mod tests {
             ty: 0.0,
             opacity: 1.0,
             blend: BlendMode::Normal,
-            native_w: 64,
-            native_h: 64,
+            native_w: 1024,
+            native_h: 1024,
         };
-        let i = (32 * 64 + 32) * 4; // centre, premul-first BGRA (opaque → straight)
+        let i = (128 * 256 + 128) * 4; // centre at 256², premul-first BGRA
         // One tinted blue layer over grey 153: out = 153 − 63.5·(1−col).
         // R(col 0) ≈ 89, B(col 0.9) ≈ 147 — darkened, blue ordering preserved.
-        let single = render_layer_stack(&[mk(&blue, true)], 64, Some(&grad)).unwrap();
+        let single = render_layer_stack(&[mk(&blue, true)], 256, Some(&grad)).unwrap();
         let (b1, g1, r1) = (single[i], single[i + 1], single[i + 2]);
         assert!(b1 > g1 && g1 > r1, "blue tint ordering B>G>R, got {r1},{g1},{b1}");
         assert!((80..100).contains(&r1) && (140..155).contains(&b1),
             "subtractive tint magnitude off: {r1},{g1},{b1}");
         // Blue over red: stacked subtraction → far darker on every channel.
         let stacked =
-            render_layer_stack(&[mk(&blue, true), mk(&red, true)], 64, Some(&grad)).unwrap();
+            render_layer_stack(&[mk(&blue, true), mk(&red, true)], 256, Some(&grad)).unwrap();
         assert!(
             stacked[i] < b1 && stacked[i + 1] < g1 && stacked[i + 2] < r1,
             "overlap must be darker than either single tint on all channels"
         );
         // Untinted frosted layer leaves the grey background (only relief).
-        let neutral = render_layer_stack(&[mk(&blue, false)], 64, Some(&grad)).unwrap();
+        let neutral = render_layer_stack(&[mk(&blue, false)], 256, Some(&grad)).unwrap();
         let (b, g, r) = (neutral[i], neutral[i + 1], neutral[i + 2]);
         assert!(
             b.abs_diff(g) < 6 && g.abs_diff(r) < 6 && g > 130,
