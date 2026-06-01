@@ -82,15 +82,24 @@ layer-color are both approximated as black.
 composites *all* a group's layers (previously only the first was used) into one
 premultiplied-first BGRA, which the compositor draws over the gradient. Glass
 layers are merged into a coverage mask and rendered as Apple's frosted relief:
-the layer colour is stripped and replaced by a near-black overlay at low opacity
-that darkens toward the bottom (concave-sphere shading). A layer is glass if it
-opts in, or if the group is a *glass context* (translucency/blur enabled, or a
-sibling is glass) and it hasn't opted out with `glass: false`. Verified against
-scrumdinger by decoding Apple's GA8: the relief lands in Apple's range (mean ≈7
-luma; centre 229 vs 232, lower 227 vs 225). The residual is Apple's
-luminance-dependent per-region shading (it lightens the body/ring and the upper
-elements), which a uniform vertical ramp can't reproduce — the proprietary part.
-element-web (non-glass) is unchanged: its layer keeps full colour.
+the layer colour is stripped and replaced by a near-black overlay. A layer is
+glass if it opts in, or if the group is a *glass context* (translucency/blur
+enabled, or a sibling is glass) and it hasn't opted out with `glass: false`.
+
+The glass darkening is **only ≈3%** — recovered by decoding Apple's scrumdinger
+GA8 and dividing the layer-region luma by the local background: out/bg ≈0.975
+(top) → 0.965 (bottom). The pronounced top-light → bottom-dark relief the eye
+sees is **almost entirely the background gradient** (252→236) showing through
+the nearly-clear glass, not the glass itself. The earlier 7–11% overlay was far
+too strong and flattened that gradient. With the subtle overlay the layer region
+grades 245→230 vs Apple's 246→229 (mean ≈5 luma over the shape). The residual is
+Apple's faint per-region (luminance-dependent) detail.
+
+This only works because the background gradient renders the right way up:
+`resolve_gradient_fill` anchors the *first* stop to the top edge regardless of
+how the stored geometry orders its endpoints (feishin's `[0.5,1]→[0.5,0.3]` is
+unchanged; scrumdinger/automatic `[0.5,0]→[0.5,1]` was rendering upside down).
+element-web (non-glass) keeps full colour; only its frame flips white-to-top.
 
 **Specular / translucency / blur — not rendered yet.** Parameters resolved and
 ready. `specular` still has no light-mode fixture to measure (feishin enables it

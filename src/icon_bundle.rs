@@ -539,10 +539,12 @@ fn render_layer_stack(layers: &[StackLayer], pixel_size: u32) -> Result<Vec<u8>>
     }
     if any_glass {
         for y in 0..w {
-            // Concave shading: nearly clear at the top, shadowed (darker) at
-            // the bottom. Apple's relief is luminance-dependent; we approximate
-            // it with this vertical ramp (≈delta 15 centre → 22 lower).
-            let strength = 0.02 + 0.10 * (y as f32 / w as f32);
+            // The glass itself only darkens the layer a few percent; the
+            // vertical relief the eye sees is mostly the background gradient
+            // showing through. Measured from Apple's scrumdinger GA8: ≈2.5% at
+            // the top rising to ≈3.5% at the bottom (out/bg ratio), constant
+            // enough that over the 252→236 gradient it grades ≈246→229.
+            let strength = 0.025 + 0.012 * (y as f32 / w as f32);
             for x in 0..w {
                 let i = y * w + x;
                 let cov = glass_cov[i] as f32 / 255.0;
@@ -1200,11 +1202,17 @@ fn resolve_gradient_fill(
     let start_rgb = rgb(&grad.stops.first()?.1)?;
     let stop_rgb = rgb(&grad.stops.last()?.1)?;
     let g = grad.geometry;
+    // Apple renders the icon background with the first stop at the TOP, last at
+    // the bottom, regardless of how the stored geometry orders its endpoints —
+    // feishin keeps its [0.5,1.0]→[0.5,0.3] (start already on top) while
+    // scrumdinger/automatic [0.5,0.0]→[0.5,1.0] would otherwise render upside
+    // down. Anchor the first stop to the higher y, preserving the spread.
+    let (top_y, bot_y) = (g[1].max(g[3]), g[1].min(g[3]));
     Some(crate::icon_render::GradientFill {
         start_rgb,
         stop_rgb,
-        start: [g[0], g[1]],
-        stop: [g[2], g[3]],
+        start: [g[0], top_y],
+        stop: [g[2], bot_y],
     })
 }
 
