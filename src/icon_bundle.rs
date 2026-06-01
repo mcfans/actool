@@ -277,14 +277,22 @@ pub fn compile_icon_bundle(
         .map(|v| !v.is_empty())
         .unwrap_or(false);
 
-    // Pre-render the full layer stack (all layers, glass shading applied) at
-    // each icon size, aligned with `icon_images`. The composite uses these
-    // instead of just the primary layer, so multi-layer icons (scrumdinger)
-    // composite correctly and glass layers become the frosted relief.
-    let stack_layers = collect_stack_layers(icon_path, &parsed);
-    let mut layer_stacks: Vec<Vec<u8>> = Vec::with_capacity(MACOS_ICON_SIZES.len());
+    // Pre-render the full layer stack (all layers, positioned, with glass
+    // shading / blend modes / opacity) at each icon size, aligned with
+    // `icon_images` — per appearance, since blend modes and fills differ
+    // between light and dark. The primary variant uses the light stack, the
+    // alternate (when the variant axis is active) the dark stack.
+    use crate::icon_effects::Appearance;
+    let light_layers = collect_stack_layers(icon_path, &parsed, Appearance::Light);
+    let dark_layers = collect_stack_layers(icon_path, &parsed, Appearance::Dark);
+    let mut light_stacks: Vec<Vec<u8>> = Vec::with_capacity(MACOS_ICON_SIZES.len());
+    let mut dark_stacks: Vec<Vec<u8>> = Vec::with_capacity(MACOS_ICON_SIZES.len());
     for (point_size, scale) in MACOS_ICON_SIZES {
-        layer_stacks.push(render_layer_stack(&stack_layers, point_size * scale)?);
+        let px = point_size * scale;
+        light_stacks.push(render_layer_stack(&light_layers, px)?);
+        if emit_variant_axis {
+            dark_stacks.push(render_layer_stack(&dark_layers, px)?);
+        }
     }
 
     let car_path = output_dir.join("Assets.car");
@@ -297,7 +305,8 @@ pub fn compile_icon_bundle(
         &color_assets,
         &gradient_assets,
         parsed.groups.first(),
-        &layer_stacks,
+        &light_stacks,
+        &dark_stacks,
         emit_variant_axis,
         platform,
         min_deploy,
@@ -435,15 +444,22 @@ struct StackLayer {
     scale: f32,
     tx: f32,
     ty: f32,
+    opacity: f32,
+    blend: BlendMode,
 }
 
-/// Resolve each visible layer's source path, glass flag, and placement (light
-/// appearance), in document order, for the layer-stack compositor.
-fn collect_stack_layers(bundle: &Path, parsed: &IconJson) -> Vec<StackLayer> {
-    use crate::icon_effects::{resolve_icon_effects, Appearance};
+/// Resolve each visible layer's source path, glass flag, placement, opacity and
+/// blend mode for `appearance`, in document order, for the layer-stack
+/// compositor.
+fn collect_stack_layers(
+    bundle: &Path,
+    parsed: &IconJson,
+    appearance: crate::icon_effects::Appearance,
+) -> Vec<StackLayer> {
+    use crate::icon_effects::resolve_icon_effects;
     let mut out = Vec::new();
     for group in &parsed.groups {
-        let eff = resolve_icon_effects(group, Appearance::Light);
+        let eff = resolve_icon_effects(group, appearance);
         // A "glass context" — the group has translucency/blur enabled or any
         // sibling layer is glass — makes every layer render as glass unless it
         // explicitly opts out (`glass: false`). scrumdinger's middle layer
@@ -480,6 +496,11 @@ fn collect_stack_layers(bundle: &Path, parsed: &IconJson) -> Vec<StackLayer> {
                     (p.scale.unwrap_or(1.0), t[0], t[1])
                 })
                 .unwrap_or((1.0, 0.0, 0.0));
+            let (opacity, blend) = eff
+                .layers
+                .get(i)
+                .map(|l| (l.opacity, parse_blend(&l.blend_mode)))
+                .unwrap_or((1.0, BlendMode::Normal));
             // Compose group∘layer, then map to canvas pixels by the base scale.
             out.push(StackLayer {
                 source: path,
@@ -487,6 +508,8 @@ fn collect_stack_layers(bundle: &Path, parsed: &IconJson) -> Vec<StackLayer> {
                 scale: LAYER_BASE_SCALE * gscale * lscale,
                 tx: LAYER_BASE_SCALE * (gscale * ltx + gtx),
                 ty: LAYER_BASE_SCALE * (gscale * lty + gty),
+                opacity,
+                blend,
             });
         }
     }
@@ -518,8 +541,68 @@ fn rasterize_layer(path: &Path, pixel_size: u32) -> Result<Vec<u8>> {
     }
 }
 
-/// Straight-alpha "src over dst" on one RGBA pixel.
-fn over(dst: &mut [u8], src: &[u8]) {
+/// Separable layer blend modes (icon.json `blend-mode-specializations`). The
+/// channel functions are the W3C/PDF separable blends.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BlendMode {
+    Normal,
+    Multiply,
+    Screen,
+    Overlay,
+    SoftLight,
+    HardLight,
+    Darken,
+    Lighten,
+}
+
+fn parse_blend(s: &str) -> BlendMode {
+    match s {
+        "multiply" => BlendMode::Multiply,
+        "screen" => BlendMode::Screen,
+        "overlay" => BlendMode::Overlay,
+        "soft-light" => BlendMode::SoftLight,
+        "hard-light" => BlendMode::HardLight,
+        "darken" => BlendMode::Darken,
+        "lighten" => BlendMode::Lighten,
+        _ => BlendMode::Normal,
+    }
+}
+
+/// Blend one channel (backdrop `cb`, source `cs`, both 0..1).
+fn blend_channel(mode: BlendMode, cb: f32, cs: f32) -> f32 {
+    let hard = |cb: f32, cs: f32| {
+        if cs <= 0.5 {
+            2.0 * cb * cs
+        } else {
+            1.0 - 2.0 * (1.0 - cb) * (1.0 - cs)
+        }
+    };
+    match mode {
+        BlendMode::Normal => cs,
+        BlendMode::Multiply => cb * cs,
+        BlendMode::Screen => cb + cs - cb * cs,
+        BlendMode::Overlay => hard(cs, cb),
+        BlendMode::HardLight => hard(cb, cs),
+        BlendMode::Darken => cb.min(cs),
+        BlendMode::Lighten => cb.max(cs),
+        BlendMode::SoftLight => {
+            if cs <= 0.5 {
+                cb - (1.0 - 2.0 * cs) * cb * (1.0 - cb)
+            } else {
+                let d = if cb <= 0.25 {
+                    ((16.0 * cb - 12.0) * cb + 4.0) * cb
+                } else {
+                    cb.sqrt()
+                };
+                cb + (2.0 * cs - 1.0) * (d - cb)
+            }
+        }
+    }
+}
+
+/// Straight-alpha source-over of `src` onto `dst` with a separable blend mode
+/// (W3C compositing). `Normal` reduces to plain "over".
+fn composite_blend(dst: &mut [u8], src: &[u8], mode: BlendMode) {
     let sa = src[3] as f32 / 255.0;
     if sa <= 0.0 {
         return;
@@ -530,9 +613,12 @@ fn over(dst: &mut [u8], src: &[u8]) {
         return;
     }
     for c in 0..3 {
-        let s = src[c] as f32;
-        let d = dst[c] as f32;
-        dst[c] = ((s * sa + d * da * (1.0 - sa)) / oa).round().clamp(0.0, 255.0) as u8;
+        let cs = src[c] as f32 / 255.0;
+        let cb = dst[c] as f32 / 255.0;
+        let bl = blend_channel(mode, cb, cs);
+        // Co = (1-αb)·αs·Cs + αb·αs·B(Cb,Cs) + (1-αs)·αb·Cb, normalised by αo.
+        let co = (1.0 - da) * sa * cs + da * sa * bl + (1.0 - sa) * da * cb;
+        dst[c] = (co / oa * 255.0).round().clamp(0.0, 255.0) as u8;
     }
     dst[3] = (oa * 255.0).round().clamp(0.0, 255.0) as u8;
 }
@@ -570,7 +656,8 @@ fn render_layer_stack(layers: &[StackLayer], pixel_size: u32) -> Result<Vec<u8>>
                     continue;
                 }
                 let si = ((ly * ts + lx) * 4) as usize;
-                let sa = src[si + 3];
+                // Layer opacity scales the source alpha.
+                let sa = (src[si + 3] as f32 * layer.opacity).round() as u8;
                 if sa == 0 {
                     continue;
                 }
@@ -581,7 +668,8 @@ fn render_layer_stack(layers: &[StackLayer], pixel_size: u32) -> Result<Vec<u8>>
                 } else {
                     let mut dst =
                         [rgba[ci * 4], rgba[ci * 4 + 1], rgba[ci * 4 + 2], rgba[ci * 4 + 3]];
-                    over(&mut dst, &src[si..si + 4]);
+                    let s = [src[si], src[si + 1], src[si + 2], sa];
+                    composite_blend(&mut dst, &s, layer.blend);
                     rgba[ci * 4..ci * 4 + 4].copy_from_slice(&dst);
                 }
             }
@@ -603,7 +691,7 @@ fn render_layer_stack(layers: &[StackLayer], pixel_size: u32) -> Result<Vec<u8>>
                 }
                 let a = (cov * strength * 255.0).round() as u8;
                 let mut dst = [rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2], rgba[i * 4 + 3]];
-                over(&mut dst, &[0, 0, 0, a]);
+                composite_blend(&mut dst, &[0, 0, 0, a], BlendMode::Normal);
                 rgba[i * 4..i * 4 + 4].copy_from_slice(&dst);
             }
         }
@@ -661,7 +749,8 @@ fn build_icon_car(
     color_assets: &[ColorAsset],
     gradient_assets: &[GradientAsset],
     group: Option<&crate::icon_json::Group>,
-    layer_stacks: &[Vec<u8>],
+    light_stacks: &[Vec<u8>],
+    dark_stacks: &[Vec<u8>],
     emit_variant_axis: bool,
     platform: &str,
     min_deploy: &str,
@@ -702,20 +791,26 @@ fn build_icon_car(
     // the alternate variant (same pixels — the variant axis is structural;
     // CUICatalog reads it to pick which alternate to display per-appearance).
     for (idx, (img_path, pixel_size, scale)) in icon_images.iter().enumerate() {
-        // Use the pre-rendered multi-layer stack (all layers + glass shading)
-        // for this size; fall back to the primary layer if absent.
-        let (layer_bgra, w, h) = match layer_stacks.get(idx) {
-            Some(stack) if stack.len() == (pixel_size * pixel_size * 4) as usize => {
-                (stack.clone(), *pixel_size, *pixel_size)
-            }
-            _ => {
-                let (b, w, h, _pf) = load_image_as_bgra(img_path, true)?;
-                (b, w, h)
-            }
-        };
         let point_size = pixel_size / scale;
         let dim2 = icon_dim2(point_size);
         for &variant in variants {
+            // Use the pre-rendered multi-layer stack for this size and variant
+            // (the alternate variant has its own dark-appearance stack); fall
+            // back to the primary layer if absent.
+            let stacks = if variant == 1 && !dark_stacks.is_empty() {
+                dark_stacks
+            } else {
+                light_stacks
+            };
+            let (layer_bgra, w, h) = match stacks.get(idx) {
+                Some(stack) if stack.len() == (pixel_size * pixel_size * 4) as usize => {
+                    (stack.clone(), *pixel_size, *pixel_size)
+                }
+                _ => {
+                    let (b, w, h, _pf) = load_image_as_bgra(img_path, true)?;
+                    (b, w, h)
+                }
+            };
             // Composite the layer over the variant's background gradient,
             // clipped to the squircle. The alternate variant uses the dark
             // gradient when present.
@@ -2025,7 +2120,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let red = dir.join("red.png");
         write_solid_png(&red, [255, 0, 0, 255]);
-        let layers = vec![StackLayer { source: red, glass: true, scale: 1.0, tx: 0.0, ty: 0.0 }];
+        let layers = vec![StackLayer { source: red, glass: true, scale: 1.0, tx: 0.0, ty: 0.0, opacity: 1.0, blend: BlendMode::Normal }];
         let out = render_layer_stack(&layers, 64).unwrap();
         let i = (32 * 64 + 32) * 4; // centre, premul-first BGRA
         let (b, g, r, a) = (out[i], out[i + 1], out[i + 2], out[i + 3]);
@@ -2039,10 +2134,41 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let red = dir.join("red2.png");
         write_solid_png(&red, [255, 0, 0, 255]);
-        let layers = vec![StackLayer { source: red, glass: false, scale: 1.0, tx: 0.0, ty: 0.0 }];
+        let layers = vec![StackLayer { source: red, glass: false, scale: 1.0, tx: 0.0, ty: 0.0, opacity: 1.0, blend: BlendMode::Normal }];
         let out = render_layer_stack(&layers, 64).unwrap();
         let i = (32 * 64 + 32) * 4; // premul-first BGRA, opaque red
         assert_eq!((out[i], out[i + 1], out[i + 2], out[i + 3]), (0, 0, 255, 255));
+    }
+
+    #[test]
+    fn blend_channel_math() {
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-5;
+        assert!(near(blend_channel(BlendMode::Screen, 0.5, 0.5), 0.75));
+        assert!(near(blend_channel(BlendMode::Multiply, 0.5, 0.5), 0.25));
+        assert!(near(blend_channel(BlendMode::Darken, 0.3, 0.7), 0.3));
+        assert!(near(blend_channel(BlendMode::Lighten, 0.3, 0.7), 0.7));
+        assert_eq!(blend_channel(BlendMode::Normal, 0.3, 0.7), 0.7);
+        // soft-light leaves a 0.5 source as the backdrop (identity).
+        assert!(near(blend_channel(BlendMode::SoftLight, 0.4, 0.5), 0.4));
+    }
+
+    #[test]
+    fn composite_blend_normal_is_over() {
+        let mut dst = [0, 0, 255, 255];
+        composite_blend(&mut dst, &[255, 0, 0, 255], BlendMode::Normal);
+        assert_eq!(dst, [255, 0, 0, 255]);
+        // Half-alpha red over opaque blue → halfway.
+        let mut dst2 = [0, 0, 255, 255];
+        composite_blend(&mut dst2, &[255, 0, 0, 128], BlendMode::Normal);
+        assert!((120..=135).contains(&dst2[0]) && (120..=135).contains(&dst2[2]));
+    }
+
+    #[test]
+    fn composite_blend_screen_lightens() {
+        let mut dst = [128, 128, 128, 255];
+        composite_blend(&mut dst, &[128, 128, 128, 255], BlendMode::Screen);
+        // screen(0.502, 0.502) ≈ 0.752 → ~192
+        assert!((185..=198).contains(&dst[0]), "got {}", dst[0]);
     }
 
     #[test]

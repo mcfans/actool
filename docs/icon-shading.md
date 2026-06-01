@@ -112,7 +112,19 @@ our layer lands at 1.004× Apple's size, centre within ~1px (mean ≈6 luma over
 the icon). element-web (no position) now insets its layer to y[182,922] like
 Apple instead of filling the canvas.
 
+**Blend modes + opacity — implemented.** Each non-glass layer composites with
+its resolved blend mode (`composite_blend`, the W3C separable blends: normal,
+multiply, screen, overlay, soft-light, hard-light, darken, lighten) and its
+opacity scales the source alpha. Because blend modes differ between appearances
+(scrumdinger/transmission use `soft-light`/`overlay` only in dark), the stack is
+rendered **per appearance** — the primary variant uses the light stack, the
+alternate the dark one. Glass layers ignore blend/opacity (they become relief).
+
 **Specular / translucency / blur — not rendered yet.** Parameters resolved and
 ready. `specular` still has no light-mode fixture to measure (feishin enables it
 only for `tinted`); translucency/blur are folded into the glass approximation's
 constants rather than applied independently. See `docs/icon-bundle-parity.md`.
+
+> The transmission fixture (deep multi-group SVG icon) exercises `screen`/
+> `overlay` blends but also hits unrelated SVG-layer rendering gaps, so it isn't
+> yet a clean end-to-end check; the blend math is unit-tested directly.
