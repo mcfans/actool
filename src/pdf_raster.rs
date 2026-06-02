@@ -205,43 +205,6 @@ pub struct RasterizedPdf {
     pub bgra: Vec<u8>,
 }
 
-/// Read the natural point dimensions of the first page of a PDF blob.
-/// Returns None if CoreGraphics is unavailable or the PDF can't be parsed.
-pub fn pdf_point_size(pdf_data: &[u8]) -> Option<(u32, u32)> {
-    let syms = load_syms()?;
-    unsafe {
-        let cf = (syms.cf_data_create)(std::ptr::null(), pdf_data.as_ptr(), pdf_data.len());
-        if cf.is_null() {
-            return None;
-        }
-        let dp = (syms.dp_create)(cf);
-        if dp.is_null() {
-            (syms.cf_release)(cf);
-            return None;
-        }
-        let doc = (syms.doc_create)(dp);
-        (syms.dp_release)(dp);
-        (syms.cf_release)(cf);
-        if doc.is_null() {
-            return None;
-        }
-        let page = (syms.doc_get_page)(doc, 1);
-        if page.is_null() {
-            (syms.doc_release)(doc);
-            return None;
-        }
-        let rect = (syms.page_get_box_rect)(page, K_CG_PDF_MEDIA_BOX);
-        (syms.doc_release)(doc);
-        let w = rect.size.width.round() as u32;
-        let h = rect.size.height.round() as u32;
-        if w == 0 || h == 0 {
-            None
-        } else {
-            Some((w, h))
-        }
-    }
-}
-
 /// Rasterize the first page of `pdf_data` at the given integer scale
 /// factor and return premultiplied BGRA pixel rows.
 /// Returns Err on hosts without CoreGraphics or when the PDF can't be
@@ -254,10 +217,6 @@ pub fn rasterize_pdf(pdf_data: &[u8], scale: u32) -> Result<RasterizedPdf> {
             return Err(anyhow!("CoreGraphics PDF support unavailable on this host"));
         }
     };
-    let (pt_w, pt_h) =
-        pdf_point_size(pdf_data).ok_or_else(|| anyhow!("could not read PDF page dimensions"))?;
-    let px_w = pt_w * scale;
-    let px_h = pt_h * scale;
     unsafe {
         let cf = (syms.cf_data_create)(std::ptr::null(), pdf_data.as_ptr(), pdf_data.len());
         if cf.is_null() {
@@ -278,6 +237,18 @@ pub fn rasterize_pdf(pdf_data: &[u8], scale: u32) -> Result<RasterizedPdf> {
         if page.is_null() {
             (syms.doc_release)(doc);
             return Err(anyhow!("PDF has no first page"));
+        }
+
+        // Pixel dimensions are round(mediaBox · scale) from the *raw* fractional
+        // mediaBox — Apple rounds after scaling, not before. For a fractional
+        // page (iina's playing_in_pip is 86.25×67.5) round(W)·scale would give
+        // 172×136 where Apple emits round(W·2)=173×135.
+        let mb = (syms.page_get_box_rect)(page, K_CG_PDF_MEDIA_BOX);
+        let px_w = (mb.size.width * scale as f64).round() as u32;
+        let px_h = (mb.size.height * scale as f64).round() as u32;
+        if px_w == 0 || px_h == 0 {
+            (syms.doc_release)(doc);
+            return Err(anyhow!("PDF page has zero dimensions"));
         }
 
         let cs = (syms.cs_create_named)(syms.srgb_name);
