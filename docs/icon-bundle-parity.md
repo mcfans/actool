@@ -181,9 +181,34 @@ endpoints to the box extremes (top→bottom) regardless of the orientation
 magnitudes, dropping feishin's background gradient to ≈0.1/luma. Default-`[0,1]`
 gradients (scrumdinger/element-web) are unchanged.
 
-**Variant-axis bundles** (top-level `fill-specializations`, e.g. feishin /
-scrumdinger) store two grayscale variants. The two are **different in kind** —
-decoded directly with `tools/compare_variant_renditions.py`:
+### When the variant axis is emitted
+
+Apple emits the light+dark appearance axis (the alternate renditions + atlas
+keyed on **attr 24 = 1**) iff the icon is **single-group** *and* declares any
+`appearance: dark` specialization — at the top level **or** nested in a
+group/layer (`json_has_dark_appearance`). Verified across six fixtures:
+
+| fixture | groups | has dark | Apple attr 24 |
+|---|---|---|---|
+| feishin, scrumdinger | 1 | yes (top-level) | `[0,1]` |
+| KeepingYouAwake | 1 | yes (layer fill) | `[0,1]` |
+| element-web | 1 | no | absent |
+| Rectangle | 2 | no (tinted only) | absent |
+| transmission | 3 | yes | absent |
+
+So gating on a top-level `fill-specializations` block alone was wrong twice
+over: it dropped KYA's whole dark variant (dark lives in a layer fill, no
+top-level block), and would wrongly add one to a multi-group icon. **Multi-group
+icons never carry the axis** even with dark content — their per-group stacks are
+recomposed live. A **`tinted`** appearance never triggers it: Apple stores no
+tinted variant at all (attr 24 stays `[0,1]` even for a synthetic *top-level*
+`appearance: tinted` fill-spec) — tint mode is a live system recolour of the
+light/dark layers. Our output matches Apple's attr-24 presence and rendition
+count on all six.
+
+**Variant-axis bundles** store two grayscale variants. The two are
+**different in kind** — decoded directly with
+`tools/compare_variant_renditions.py`:
 - **Primary → GA8 = the light composite** (gradient + content, opaque). Matches
   Apple to ≈1.4/luma (feishin) — interior ≈0.4, residual is the boundary AA ring.
   scrumdinger is ≈4.5: its `system-light` background gradient is byte-close

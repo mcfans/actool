@@ -268,14 +268,19 @@ pub fn compile_icon_bundle(
 
     // SVG-sourced layers are emitted as Vector renditions (raw SVG) by
     // build_icon_car, so they pass through untouched here.
-    // Top-level fill-specializations triggers Apple's appearance-variant
-    // expansion: a second set of pre-rendered sized renditions + an
-    // alternate atlas keyed on attribute 24 = 1. Verified on scrumdinger.
-    let emit_variant_axis = parsed
-        .fill_specializations
-        .as_ref()
-        .map(|v| !v.is_empty())
-        .unwrap_or(false);
+    // Apple emits the light+dark appearance-variant axis (a second set of
+    // pre-rendered sized renditions + an alternate atlas keyed on attribute
+    // 24 = 1) for a **single-group** icon that declares any `appearance: dark`
+    // specialization — not only a top-level `fill-specializations`. KYA has
+    // `fill-specializations: null` at the top level but a dark layer fill, and
+    // Apple still emits 33 renditions with attr 24 = [0, 1]; gating on the
+    // top-level block alone dropped its entire dark variant. **Multi-group**
+    // icons never carry the axis even with dark content (transmission's 3 groups
+    // and Rectangle's 2 → attr 24 absent in Apple's output) — their per-group
+    // stacks are recomposed live instead. A `tinted` appearance never triggers
+    // it (tint mode is a live system recolour, never a stored variant).
+    let emit_variant_axis =
+        parsed.groups.len() == 1 && json_has_dark_appearance(&icon_json_value);
 
     // Pre-render the full layer stack (all layers, positioned, with glass
     // shading / blend modes / opacity) at each icon size, aligned with
@@ -1882,6 +1887,26 @@ fn fill_is_automatic(fill: Option<&Fill>) -> bool {
     }
 }
 
+/// Whether the icon.json declares any `appearance: dark` specialization
+/// anywhere — top-level `fill-specializations` or nested in a group/layer
+/// (`*-specializations`). This is Apple's trigger for the light+dark variant
+/// axis: a bundle with dark content gets a second (dark) set of renditions
+/// keyed on attr 24 = 1. Walks the raw JSON so it catches every specialization
+/// array without enumerating each typed field. `tinted` entries are ignored —
+/// tint mode is a live system recolour, never a stored variant.
+fn json_has_dark_appearance(v: &serde_json::Value) -> bool {
+    match v {
+        serde_json::Value::Object(map) => {
+            if map.get("appearance").and_then(|a| a.as_str()) == Some("dark") {
+                return true;
+            }
+            map.values().any(json_has_dark_appearance)
+        }
+        serde_json::Value::Array(items) => items.iter().any(json_has_dark_appearance),
+        _ => false,
+    }
+}
+
 /// A parsed Apple color-spec string like `srgb:0.97288,0.97288,0.97288,1.0`
 /// or `extended-gray:0.84536,1.0`. Returns (colorspace_id, components).
 fn parse_color_spec(spec: &str) -> Option<(u32, Vec<f64>)> {
@@ -2509,6 +2534,30 @@ fn build_bitmapkeys(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dark_appearance_detection() {
+        // Nested dark spec (KYA-style: layer fill-specializations) is detected.
+        let kya = serde_json::json!({
+            "fill": {"automatic-gradient": "extended-gray:0.86,1.0"},
+            "groups": [{"layers": [{"fill-specializations": [
+                {"value": {"solid": "extended-gray:0.17,1.0"}},
+                {"appearance": "dark", "value": {"solid": "extended-gray:0.87,1.0"}},
+                {"appearance": "tinted", "value": {"solid": "gray:0.94,1.0"}}
+            ]}]}]
+        });
+        assert!(json_has_dark_appearance(&kya));
+        // tinted-only (Rectangle-style) is NOT a dark appearance.
+        let tinted_only = serde_json::json!({
+            "groups": [{"layers": [{"fill-specializations": [
+                {"appearance": "tinted", "value": {"solid": "gray:0.9,1.0"}}
+            ]}]}]
+        });
+        assert!(!json_has_dark_appearance(&tinted_only));
+        // No specializations at all.
+        let plain = serde_json::json!({"fill": "automatic", "groups": [{"layers": []}]});
+        assert!(!json_has_dark_appearance(&plain));
+    }
 
     #[test]
     fn pre_rendered_name_matches_apple_pattern() {
