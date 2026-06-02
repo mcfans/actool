@@ -59,12 +59,32 @@ Format: `ZZZZPackedAsset-{scale}.0.{format_idx}-gamut0`
 
 ## dim1 Mapping
 
-PackedAsset renditions use dim1 to identify the atlas group:
-- dim1=0: First BGRA group (regular images)
-- dim1=1: Second BGRA group (icon images)
-- dim1=2: GA8 group
+The atlas index lives in the **dim1 key attribute (8)**, NOT the name — the
+name's middle field is always `0` (`Atlas::name`), so every atlas of a given
+(scale, format) shares a name and is told apart by its dim1 key. dim1 is a
+**per-scale counter spanning both formats**: on iina @1x, BGRA atlases get
+dim1 0..12 and the GA8 atlases continue at 13..14; @2x, BGRA 0..3 then GA8 4..7.
+Packed-image INLK links carry that dim1, so resolution is by key, not name.
 
-dim1 increments sequentially across all format groups.
+## xcassets packing: functional parity, byte geometry is renderer-bound
+
+Our atlas packing is **functionally identical to Apple** — iina compiles to
+98 OK / 0 FAILED via `validate_car`, the same as Apple's own `.car`. CUICatalog
+resolves each packed sprite from the INLK `(x,y,w,h)` coordinates, which we emit
+correctly, so the icons load regardless of how the atlas sheet itself is laid
+out.
+
+The atlas **geometry** still differs from Apple byte-for-byte (different sheet
+dimensions, sprite-to-atlas assignment, atlas count) and is the proprietary
+bin-packer — the same one dropped below for iOS app icons. Apple's packer is
+**size-bucketed**: on iina @1x it puts the 128×128 sprites two-to-an-atlas in a
+single row (262×132, eleven such atlases for the 22 sprites), packs the 32×32
+sprites 21-to-an-atlas in a 5-column grid (172×172), and the 16×16 + leftovers in
+a 108×90 sheet; @2x sheets reach 224×224 / 290×138 (wider than our 262 cap). The
+max-dimension and bucketing rules don't reduce to a simple cap (172-tall grids
+coexist with 132-tall single rows), matching the "wasn't reverse-engineerable
+from a 59-config sweep" conclusion below. Since it's byte-only (functional parity
+holds), it is intentionally left unmatched — do not retune `pack_images_split`.
 
 ---
 
