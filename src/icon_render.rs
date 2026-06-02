@@ -217,9 +217,8 @@ pub struct ShadowParams {
 }
 
 /// Icon-shape geometry as a fraction of the canvas edge, measured from Apple's
-/// 1024px output: 100px inset, 220px corner radius.
+/// 1024px output: 100px inset; corner shape is the `SQUIRCLE_N` superellipse.
 const MARGIN_RATIO: f64 = 100.0 / 1024.0;
-const CORNER_RATIO: f64 = 220.0 / 1024.0;
 
 /// macOS app-icon shape is a squircle — a superellipse |x/a|ⁿ + |y/a|ⁿ = 1, not
 /// a circular-arc rounded rect. Fitting Apple's `.car` alpha boundary (the icon
@@ -406,13 +405,23 @@ fn lin_to_srgb(c: f64) -> f64 {
     }
 }
 
-/// Signed distance to the icon squircle (rounded rect), negative inside.
+/// Approximate signed distance (px) to the icon superellipse |x/a|ⁿ+|y/a|ⁿ=1,
+/// negative inside. A superellipse has no closed-form SDF, so use the first-order
+/// estimate `(g−1)/|∇g|` where `g=(|x/a|ⁿ+|y/a|ⁿ)^(1/n)` — exact on the boundary
+/// and accurate within the thin band the edge lighting touches. Must match the
+/// clip shape (`build_squircle_path`), or the highlight lands off the corners.
 #[inline]
-fn squircle_sdf(px: f64, py: f64, center: f64, half: f64, r: f64) -> f64 {
-    let qx = (px - center).abs() - (half - r);
-    let qy = (py - center).abs() - (half - r);
-    let (ax, ay) = (qx.max(0.0), qy.max(0.0));
-    (ax * ax + ay * ay).sqrt() + qx.max(qy).min(0.0) - r
+fn squircle_sdf(px: f64, py: f64, center: f64, half: f64, n: f64) -> f64 {
+    let nx = ((px - center).abs() / half).max(1e-9);
+    let ny = ((py - center).abs() / half).max(1e-9);
+    let denom = nx.powf(n) + ny.powf(n);
+    let g = denom.powf(1.0 / n);
+    // |∇g| in pixel units (chain rule through the /half normalization).
+    let pow = denom.powf(1.0 / n - 1.0);
+    let dgx = pow * nx.powf(n - 1.0) / half;
+    let dgy = pow * ny.powf(n - 1.0) / half;
+    let gl = (dgx * dgx + dgy * dgy).sqrt().max(1e-12);
+    (g - 1.0) / gl
 }
 
 /// Apple's icon-frame "glass-tile" lighting: a soft white light added along the
@@ -425,7 +434,6 @@ fn apply_icon_lighting(data: &mut [u8], size: usize) {
     let sz = size as f64;
     let center = sz / 2.0;
     let half = (sz - 2.0 * sz * MARGIN_RATIO) / 2.0;
-    let r = sz * CORNER_RATIO;
     let depth = 16.5 * sz / 1024.0;
     if depth < 1.0 {
         return;
@@ -440,15 +448,15 @@ fn apply_icon_lighting(data: &mut [u8], size: usize) {
                 continue;
             }
             let (px, py) = (x as f64 + 0.5, y as f64 + 0.5);
-            let dist = -squircle_sdf(px, py, center, half, r);
+            let dist = -squircle_sdf(px, py, center, half, SQUIRCLE_N);
             if dist < 0.0 || dist >= depth {
                 continue;
             }
             // Outward normal via central difference of the SDF.
-            let gx = squircle_sdf(px + 1.0, py, center, half, r)
-                - squircle_sdf(px - 1.0, py, center, half, r);
-            let gy = squircle_sdf(px, py + 1.0, center, half, r)
-                - squircle_sdf(px, py - 1.0, center, half, r);
+            let gx = squircle_sdf(px + 1.0, py, center, half, SQUIRCLE_N)
+                - squircle_sdf(px - 1.0, py, center, half, SQUIRCLE_N);
+            let gy = squircle_sdf(px, py + 1.0, center, half, SQUIRCLE_N)
+                - squircle_sdf(px, py - 1.0, center, half, SQUIRCLE_N);
             let gl = (gx * gx + gy * gy).sqrt().max(1e-6);
             let dir = (-gx / gl - gy / gl) / sqrt2; // top-left → +1
             let l0 = L0_BASE + L0_DIR * dir;
