@@ -94,9 +94,15 @@ impl Atlas {
         // always BGRA — so we just take whichever is non-zero.
         let fmt_idx: u32 = if &self.pixel_format == b"BGRA" { 0 } else { 1 };
         let third = if self.gamut > 0 { self.gamut } else { fmt_idx };
+        // The middle field is always 0: Apple names every atlas of a given
+        // (scale, format) identically — e.g. all 13 BGRA @1x atlases are
+        // `ZZZZPackedAsset-1.0.0-gamut0`, distinguished only by the dim1 key
+        // attribute (a per-scale counter spanning both formats). The atlas
+        // index lives in the rendition key, not the name string; packed-image
+        // INLK links resolve by that key, so duplicate names are expected.
         format!(
-            "ZZZZPackedAsset-{}.{}.{}-gamut{}",
-            self.scale, self.dim1, third, self.gamut
+            "ZZZZPackedAsset-{}.0.{}-gamut{}",
+            self.scale, third, self.gamut
         )
     }
 
@@ -453,13 +459,16 @@ mod tests {
 
     #[test]
     fn atlas_name_format() {
+        // The middle field is always 0 regardless of dim1 (the atlas index
+        // lives in the rendition key, not the name) — Apple names every atlas
+        // of a (scale, format) identically.
         let atlas = Atlas {
             scale: 2,
             dim1: 3,
             pixel_format: *b"BGRA",
             ..Default::default()
         };
-        assert_eq!(atlas.name(), "ZZZZPackedAsset-2.3.0-gamut0");
+        assert_eq!(atlas.name(), "ZZZZPackedAsset-2.0.0-gamut0");
         let atlas = Atlas {
             scale: 1,
             dim1: 0,
