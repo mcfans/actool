@@ -1,8 +1,9 @@
 //! PDF rasterization via macOS CoreGraphics.
 //!
 //! Apple's actool at any deployment target since macOS 11 turns each
-//! `.pdf` imageset asset into three renditions: the original PDF
-//! (`LAYOUT_PDF=9`) and rasterized `@1x` + `@2x` packed_ref entries.
+//! `.pdf` imageset asset into three renditions: the PDF (`LAYOUT_PDF=9`,
+//! re-serialized through CoreGraphics into a compact normalized form — see
+//! `normalize_pdf`) and rasterized `@1x` + `@2x` packed_ref entries.
 //! We mirror that with the CGPDFDocument APIs from CoreGraphics —
 //! Rust-native PDF renderers won't match Apple's output byte-for-byte
 //! (and we don't want a heavy dependency just for vector icon assets).
@@ -69,6 +70,15 @@ type CGBitmapGetDataFn = unsafe extern "C" fn(*mut c_void) -> *mut u8;
 type CGContextScaleFn = unsafe extern "C" fn(*mut c_void, c_double, c_double);
 type CGContextDrawPDFFn = unsafe extern "C" fn(*mut c_void, *mut c_void);
 type CGContextReleaseFn = unsafe extern "C" fn(*mut c_void);
+// PDF re-serialization (writer side).
+type CFDataCreateMutableFn = unsafe extern "C" fn(*const c_void, isize) -> *mut c_void;
+type CGDataConsumerCreateFn = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
+type CGPDFContextCreateFn =
+    unsafe extern "C" fn(*mut c_void, *const CGRect, *mut c_void) -> *mut c_void;
+type CGPDFContextPageFn = unsafe extern "C" fn(*mut c_void, *mut c_void);
+type CGContextVoidFn = unsafe extern "C" fn(*mut c_void);
+type CFDataGetLengthFn = unsafe extern "C" fn(*mut c_void) -> isize;
+type CFDataGetBytePtrFn = unsafe extern "C" fn(*mut c_void) -> *const u8;
 
 struct PdfSyms {
     cf_data_create: CFDataCreateFn,
@@ -86,6 +96,15 @@ struct PdfSyms {
     ctx_scale: CGContextScaleFn,
     ctx_draw_pdf: CGContextDrawPDFFn,
     ctx_release: CGContextReleaseFn,
+    cf_data_create_mutable: CFDataCreateMutableFn,
+    data_consumer_create: CGDataConsumerCreateFn,
+    data_consumer_release: CGDPRelease,
+    pdf_ctx_create: CGPDFContextCreateFn,
+    pdf_begin_page: CGPDFContextPageFn,
+    pdf_end_page: CGContextVoidFn,
+    pdf_close: CGContextVoidFn,
+    cf_data_get_length: CFDataGetLengthFn,
+    cf_data_get_byte_ptr: CFDataGetBytePtrFn,
     srgb_name: *mut c_void,
 }
 
@@ -145,6 +164,15 @@ fn load_syms() -> Option<&'static PdfSyms> {
             ctx_scale: sym!(cg, "CGContextScaleCTM", CGContextScaleFn),
             ctx_draw_pdf: sym!(cg, "CGContextDrawPDFPage", CGContextDrawPDFFn),
             ctx_release: sym!(cg, "CGContextRelease", CGContextReleaseFn),
+            cf_data_create_mutable: sym!(cf, "CFDataCreateMutable", CFDataCreateMutableFn),
+            data_consumer_create: sym!(cg, "CGDataConsumerCreateWithCFData", CGDataConsumerCreateFn),
+            data_consumer_release: sym!(cg, "CGDataConsumerRelease", CGDPRelease),
+            pdf_ctx_create: sym!(cg, "CGPDFContextCreate", CGPDFContextCreateFn),
+            pdf_begin_page: sym!(cg, "CGPDFContextBeginPage", CGPDFContextPageFn),
+            pdf_end_page: sym!(cg, "CGPDFContextEndPage", CGContextVoidFn),
+            pdf_close: sym!(cg, "CGPDFContextClose", CGContextVoidFn),
+            cf_data_get_length: sym!(cf, "CFDataGetLength", CFDataGetLengthFn),
+            cf_data_get_byte_ptr: sym!(cf, "CFDataGetBytePtr", CFDataGetBytePtrFn),
             srgb_name: srgb_name_ptr,
         })
     })
@@ -294,6 +322,79 @@ pub fn rasterize_pdf(pdf_data: &[u8], scale: u32) -> Result<RasterizedPdf> {
             scale,
             bgra,
         })
+    }
+}
+
+/// Re-serialize a PDF the way Apple's actool does: draw the first page into a
+/// fresh `CGPDFContext` and return the resulting bytes. CoreGraphics rewrites
+/// the page into a compact, normalized PDF (recompressed streams, dropped
+/// cruft) — iina's 167 KB design-tool PDFs come back at ~3.8 KB, matching
+/// Apple's stored renditions to within a few bytes. Returns `None` on hosts
+/// without CoreGraphics or if any step fails, so callers fall back to the raw
+/// bytes. Not byte-identical to Apple (the emitted PDF carries a CreationDate /
+/// document ID that varies per run, like the `.icon` UUIDs), but size- and
+/// content-equivalent.
+pub fn normalize_pdf(pdf_data: &[u8]) -> Option<Vec<u8>> {
+    let syms = load_syms()?;
+    unsafe {
+        let cf = (syms.cf_data_create)(std::ptr::null(), pdf_data.as_ptr(), pdf_data.len());
+        if cf.is_null() {
+            return None;
+        }
+        let dp = (syms.dp_create)(cf);
+        if dp.is_null() {
+            (syms.cf_release)(cf);
+            return None;
+        }
+        let doc = (syms.doc_create)(dp);
+        (syms.dp_release)(dp);
+        (syms.cf_release)(cf);
+        if doc.is_null() {
+            return None;
+        }
+        let page = (syms.doc_get_page)(doc, 1);
+        if page.is_null() {
+            (syms.doc_release)(doc);
+            return None;
+        }
+        let media_box = (syms.page_get_box_rect)(page, K_CG_PDF_MEDIA_BOX);
+
+        let out = (syms.cf_data_create_mutable)(std::ptr::null(), 0);
+        if out.is_null() {
+            (syms.doc_release)(doc);
+            return None;
+        }
+        let consumer = (syms.data_consumer_create)(out);
+        if consumer.is_null() {
+            (syms.cf_release)(out);
+            (syms.doc_release)(doc);
+            return None;
+        }
+        let ctx = (syms.pdf_ctx_create)(consumer, &media_box, std::ptr::null_mut());
+        if ctx.is_null() {
+            (syms.data_consumer_release)(consumer);
+            (syms.cf_release)(out);
+            (syms.doc_release)(doc);
+            return None;
+        }
+        (syms.pdf_begin_page)(ctx, std::ptr::null_mut());
+        (syms.ctx_draw_pdf)(ctx, page);
+        (syms.pdf_end_page)(ctx);
+        (syms.pdf_close)(ctx);
+
+        let len = (syms.cf_data_get_length)(out);
+        let ptr = (syms.cf_data_get_byte_ptr)(out);
+        let bytes = if len > 0 && !ptr.is_null() {
+            Some(std::slice::from_raw_parts(ptr, len as usize).to_vec())
+        } else {
+            None
+        };
+
+        (syms.ctx_release)(ctx);
+        (syms.data_consumer_release)(consumer);
+        (syms.cf_release)(out);
+        (syms.doc_release)(doc);
+        bytes
     }
 }
 

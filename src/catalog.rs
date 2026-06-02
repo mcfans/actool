@@ -515,7 +515,13 @@ impl AssetCatalog {
             let img_rend_start = renditions.len();
             let lower_filename = filename.to_ascii_lowercase();
             if lower_filename.ends_with(".pdf") {
-                let pdf_data = fs::read(&img_path)?;
+                let raw_pdf = fs::read(&img_path)?;
+                // Apple stores the PDF re-serialized through CoreGraphics (a
+                // compact, normalized rewrite — iina's 167 KB design PDFs come
+                // back ~3.8 KB), not the raw source. Fall back to the raw bytes
+                // when CoreGraphics is unavailable.
+                let pdf_data =
+                    crate::pdf_raster::normalize_pdf(&raw_pdf).unwrap_or(raw_pdf);
                 let csi = car::build_pdf_csi(filename, &pdf_data);
                 let mut rend = Rendition {
                     name: filename.to_string(),
