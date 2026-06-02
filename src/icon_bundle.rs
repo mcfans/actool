@@ -847,6 +847,13 @@ fn render_layer_stack(
     let mut shadow_dark = vec![[0.0f32; 3]; n];
     let mut any_shadow = false;
     let f = pixel_size as f32 / 1024.0;
+    // Rasterizing a layer source decodes the file and Lanczos-resizes it — the
+    // dominant per-layer cost. Multi-group icons flatten every group's layers
+    // into one stack, so the same source is requested at the same size once per
+    // group (50 groups × every size = hundreds of identical decodes). Cache by
+    // (source, w, h) so each is rasterized once per render.
+    let mut raster_cache: std::collections::HashMap<(PathBuf, u32, u32), Vec<u8>> =
+        std::collections::HashMap::new();
     for layer in layers {
         // Render at the layer's native aspect, scaled by base·group·layer (so a
         // non-1024 / non-square SVG keeps its proportions), then blit centred +
@@ -854,7 +861,12 @@ fn render_layer_stack(
         let k = layer.scale * f;
         let rw = ((layer.native_w as f32 * k).round() as u32).max(1);
         let rh = ((layer.native_h as f32 * k).round() as u32).max(1);
-        let src = rasterize_layer(&layer.source, rw, rh)?;
+        let cache_key = (layer.source.clone(), rw, rh);
+        if !raster_cache.contains_key(&cache_key) {
+            let raster = rasterize_layer(&layer.source, rw, rh)?;
+            raster_cache.insert(cache_key.clone(), raster);
+        }
+        let src = &raster_cache[&cache_key];
         let (rw, rh) = (rw as i64, rh as i64);
         let half = pixel_size as f32 / 2.0;
         let ox = (half + layer.tx * f - rw as f32 / 2.0).round() as i64;
