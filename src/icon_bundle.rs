@@ -1162,7 +1162,17 @@ fn build_icon_car(
                 if variant == 0 {
                     (crate::catalog::bgra_to_ga8_force(&composited), *b" 8AG", 2)
                 } else {
-                    (crate::catalog::bgra_to_ga16_force(&composited), *b"61AG", 6)
+                    // The dark (alternate) variant is NOT a baked dark composite
+                    // — Apple stores a flat near-white squircle tint that
+                    // CUICatalog composites over the light icon. Build that tint
+                    // (premult gray 59 / α 60 over the squircle, plus the icon's
+                    // black drop shadow) instead of the dark composite.
+                    let dark = fill
+                        .and_then(|f| {
+                            build_dark_variant_tint(*pixel_size, f, shadow.as_ref())
+                        })
+                        .unwrap_or_else(|| composited.clone());
+                    (crate::catalog::bgra_to_ga16_force(&dark), *b"61AG", 6)
                 }
             } else {
                 (composited, *b"BGRA", car::colorspace_for_pixel_format(b"BGRA"))
@@ -1676,6 +1686,47 @@ fn shadow_params(
         blur: pixel_size as f64 * BLUR_RATIO,
         offset: [0.0, pixel_size as f64 * OFFSET_Y_RATIO],
     })
+}
+
+/// Premultiplied-gray and alpha of Apple's flat dark-variant tint at full
+/// squircle coverage (measured constant on feishin/scrumdinger GA16: a
+/// near-white tint, premult gray ≈59, α ≈60 — `tools/compare_variant_renditions.py`).
+const DARK_TINT_GRAY: f32 = 59.0;
+const DARK_TINT_ALPHA: f32 = 60.0;
+
+/// Build the dark (alternate) variant rendition: not a baked dark composite but
+/// Apple's flat semi-transparent squircle tint (premultiplied near-white at
+/// `DARK_TINT_GRAY`/`DARK_TINT_ALPHA`) composited over the icon's black drop
+/// shadow. CUICatalog overlays this on the light icon to produce dark mode.
+/// Returns premultiplied-first BGRA (what `bgra_to_ga16_force` consumes).
+fn build_dark_variant_tint(
+    pixel_size: u32,
+    fill: &crate::icon_render::GradientFill,
+    shadow: Option<&crate::icon_render::ShadowParams>,
+) -> Option<Vec<u8>> {
+    let n = (pixel_size * pixel_size) as usize;
+    let empty = vec![0u8; n * 4];
+    // Squircle coverage (alpha only); shadow adds the margin halo.
+    let mask = crate::icon_render::composite_icon(pixel_size, fill, &empty, None)?;
+    let shadowed = match shadow {
+        Some(s) => crate::icon_render::composite_icon(pixel_size, fill, &empty, Some(s))?,
+        None => mask.clone(),
+    };
+    let mut out = vec![0u8; n * 4];
+    for i in 0..n {
+        let m = mask[i * 4 + 3] as f32 / 255.0; // squircle coverage
+        // Black drop shadow restricted to the margin (outside the squircle).
+        let sa = (shadowed[i * 4 + 3] as f32 / 255.0) * (1.0 - m);
+        let tint_a = (DARK_TINT_ALPHA / 255.0) * m;
+        let out_a = tint_a + sa * (1.0 - tint_a); // tint over black shadow
+        let pg = (DARK_TINT_GRAY * m).round().clamp(0.0, 255.0) as u8;
+        let a = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
+        out[i * 4] = pg;
+        out[i * 4 + 1] = pg;
+        out[i * 4 + 2] = pg;
+        out[i * 4 + 3] = a;
+    }
+    Some(out)
 }
 
 /// Resolve a GradientAsset into a renderable background fill, looking up each
