@@ -832,6 +832,10 @@ impl AssetCatalog {
                 .get("platform")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
+            let idiom = img_info
+                .get("idiom")
+                .and_then(|v| v.as_str())
+                .unwrap_or("universal");
             let is_single_size = self.is_single_size_ios_entry(img_info);
             if is_single_size {
                 self.single_size_ios_appicon = true;
@@ -842,15 +846,31 @@ impl AssetCatalog {
             {
                 continue;
             }
+            // Drop app-icon entries whose idiom doesn't belong to the target
+            // platform. iOS keeps iphone/ipad/universal/ios-marketing; macOS
+            // keeps mac/universal; tvOS keeps tv/universal; watchOS keeps
+            // watch/universal. This mirrors `/usr/bin/actool --platform`.
+            let idiom_applies = match self.platform.as_str() {
+                "macosx" => idiom == "mac" || idiom == "universal",
+                "iphoneos" | "iphonesimulator" => {
+                    matches!(idiom, "iphone" | "ipad" | "universal" | "ios-marketing" | "marketing")
+                }
+                "appletvos" | "appletvsimulator" => {
+                    matches!(idiom, "tv" | "universal" | "marketing")
+                }
+                "watchos" | "watchsimulator" => {
+                    matches!(idiom, "watch" | "universal" | "marketing")
+                }
+                _ => true,
+            };
+            if !idiom_applies {
+                continue;
+            }
 
             // App-icon renditions carry their device idiom on iOS (phone=1,
             // pad=2, marketing=6) so per-device icon lookups resolve. macOS
             // app icons stay idiom-less.
             let idiom_num = if car::is_idiom_platform(&self.platform) {
-                let idiom = img_info
-                    .get("idiom")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("universal");
                 car::idiom_value(idiom)
             } else {
                 0
