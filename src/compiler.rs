@@ -11,12 +11,13 @@ use crate::packer::{self, PackedImage};
 use anyhow::Result;
 use byteorder::{LittleEndian, WriteBytesExt};
 use indexmap::IndexMap;
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 #[allow(clippy::too_many_arguments)]
 pub fn compile_catalog(
-    xcassets_path: &Path,
+    xcassets_paths: &[PathBuf],
     output_dir: &Path,
     platform: &str,
     min_deploy: &str,
@@ -32,15 +33,49 @@ pub fn compile_catalog(
     fs::create_dir_all(output_dir)?;
     let has_icon = app_icon.is_some();
 
-    let mut catalog = AssetCatalog::new(
-        xcassets_path.to_path_buf(),
+    // Parse each provided asset catalog and merge their contents into a single
+    // compilation unit, matching Apple actool behavior when multiple catalogs
+    // are passed on the command line.
+    let mut all_renditions: Vec<crate::car::Rendition> = Vec::new();
+    let mut all_facets: IndexMap<String, crate::catalog::Facet> = IndexMap::new();
+    let mut all_loose_jpegs: Vec<(String, PathBuf)> = Vec::new();
+    let mut all_locales: HashSet<String> = HashSet::new();
+    let mut any_single_size_ios_appicon = false;
+    let mut all_appicon_images: Vec<crate::catalog::IconImage> = Vec::new();
+    let mut all_icon_images: Vec<(PathBuf, u32, u32)> = Vec::new();
+
+    for path in xcassets_paths {
+        let mut catalog = AssetCatalog::new(
+            path.to_path_buf(),
+            platform.to_string(),
+            min_deploy.to_string(),
+            app_icon.map(|s| s.to_string()),
+            include_languages.clone(),
+            development_region.clone(),
+        );
+        let (mut renditions, facets) = catalog.parse()?;
+        all_renditions.append(&mut renditions);
+        for (name, facet) in facets {
+            all_facets.entry(name).or_insert(facet);
+        }
+        all_loose_jpegs.append(&mut catalog.loose_jpegs.clone());
+        all_locales.extend(catalog.get_locales_used());
+        any_single_size_ios_appicon |= catalog.is_single_size_ios_appicon();
+        all_appicon_images.append(&mut catalog.get_appicon_images()?);
+        all_icon_images.append(&mut catalog.get_icon_images()?);
+    }
+
+    // Build a representative catalog object for methods that still need it.
+    let _catalog = AssetCatalog::new(
+        xcassets_paths[0].clone(),
         platform.to_string(),
         min_deploy.to_string(),
         app_icon.map(|s| s.to_string()),
         include_languages,
         development_region,
     );
-    let (mut renditions, facets) = catalog.parse()?;
+
+    let (mut renditions, facets) = (all_renditions, all_facets);
 
     let deploy_ver: (u32, u32) = {
         let mut parts = min_deploy.split('.');
@@ -280,7 +315,7 @@ pub fn compile_catalog(
     // iOS catalogs declare CoreUI 975 and key-semantics 2 (idiom-aware keys);
     // macOS stays on the legacy 972 / key-semantics 1 pairing. tvOS and
     // Xcode 14+ single-size iOS app icons use the legacy 972 / 1 pairing.
-    let (coreui_ver, key_semantics) = if catalog.is_single_size_ios_appicon() {
+    let (coreui_ver, key_semantics) = if any_single_size_ios_appicon {
         (972, 1)
     } else if platform == "appletvos" || platform == "appletvsimulator" {
         (972, 1)
@@ -353,7 +388,7 @@ pub fn compile_catalog(
     // Loose JPEG files for deployment targets below the per-platform
     // JPEG-in-CAR threshold. Named after the imageset stem with the
     // source file's extension preserved (matches host actool).
-    for (imageset_stem, src) in &catalog.loose_jpegs {
+    for (imageset_stem, src) in &all_loose_jpegs {
         let ext = src
             .extension()
             .and_then(|s| s.to_str())
@@ -367,7 +402,7 @@ pub fn compile_catalog(
         if car::is_idiom_platform(platform) {
             // iOS home-screen icons are emitted as loose PNGs (one per idiom,
             // at @2x) alongside the CAR — not as an .icns bundle.
-            for loose in ios_loose_icons(&catalog.get_appicon_images()?, icon_name) {
+            for loose in ios_loose_icons(&all_appicon_images, icon_name) {
                 let dest = output_dir.join(&loose.filename);
                 let expected_px = loose.point_w * loose.scale;
                 if let Some((src_w, src_h)) = png_dimensions(&loose.src) {
@@ -382,7 +417,7 @@ pub fn compile_catalog(
                 output_files.push(fs::canonicalize(&dest).unwrap_or(dest));
             }
         } else if standalone_icon_behavior != "none" {
-            let icons = catalog.get_icon_images()?;
+            let icons = all_icon_images;
             if !icons.is_empty() {
                 let icns_path = output_dir.join(format!("{icon_name}.icns"));
                 icns::create_icns(&icons, &icns_path)?;
@@ -397,7 +432,9 @@ pub fn compile_catalog(
 
     if let Some(path) = info_plist_path {
         let locales = if plist_localizations {
-            catalog.get_locales_used()
+            let mut v: Vec<String> = all_locales.into_iter().collect();
+            v.sort();
+            v
         } else {
             Vec::new()
         };
@@ -414,7 +451,7 @@ pub fn compile_catalog(
                 )?;
             }
         } else if let (true, Some(icon_name)) = (car::is_idiom_platform(platform), app_icon) {
-            write_ios_icon_plist(path, icon_name, &catalog.get_appicon_images()?)?;
+            write_ios_icon_plist(path, icon_name, &all_appicon_images)?;
         } else {
             write_info_plist(
                 path,
