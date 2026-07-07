@@ -40,7 +40,6 @@ pub fn compile_catalog(
     let mut all_facets: IndexMap<String, crate::catalog::Facet> = IndexMap::new();
     let mut all_loose_jpegs: Vec<(String, PathBuf)> = Vec::new();
     let mut all_locales: HashSet<String> = HashSet::new();
-    let mut any_single_size_ios_appicon = false;
     let mut all_appicon_images: Vec<crate::catalog::IconImage> = Vec::new();
     let mut all_icon_images: Vec<(PathBuf, u32, u32)> = Vec::new();
 
@@ -60,7 +59,6 @@ pub fn compile_catalog(
         }
         all_loose_jpegs.append(&mut catalog.loose_jpegs.clone());
         all_locales.extend(catalog.get_locales_used());
-        any_single_size_ios_appicon |= catalog.is_single_size_ios_appicon();
         all_appicon_images.append(&mut catalog.get_appicon_images()?);
         all_icon_images.append(&mut catalog.get_icon_images()?);
     }
@@ -312,15 +310,16 @@ pub fn compile_catalog(
     all_entries.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut bom = BomWriter::new();
-    // iOS catalogs declare CoreUI 975 and key-semantics 2 (idiom-aware keys);
-    // macOS stays on the legacy 972 / key-semantics 1 pairing. tvOS and
-    // Xcode 14+ single-size iOS app icons use the legacy 972 / 1 pairing.
-    let (coreui_ver, key_semantics) = if any_single_size_ios_appicon {
-        (972, 1)
-    } else if platform == "appletvos" || platform == "appletvsimulator" {
+    // iOS catalogs declare key-semantics 2 (idiom-aware keys). The CoreUI
+    // version is 975 when a single .xcassets document is compiled on its own,
+    // but drops to 972 when multiple catalogs are passed on the same command
+    // line (Apple merges them into a single compilation unit). macOS and tvOS
+    // stay on the legacy 972 / key-semantics 1 pairing.
+    let (coreui_ver, key_semantics) = if platform == "appletvos" || platform == "appletvsimulator" {
         (972, 1)
     } else if car::is_idiom_platform(platform) {
-        (975, 2)
+        let ver = if xcassets_paths.len() == 1 { 975 } else { 972 };
+        (ver, 2)
     } else {
         (972, 1)
     };
@@ -472,7 +471,7 @@ fn build_bitmapkeys(
     rendition_entries: &[(Vec<u8>, Vec<u8>)],
     keyformat: &[u16],
 ) -> Vec<(u32, Vec<u8>)> {
-    let wildcard_attrs: std::collections::HashSet<u16> = [1, 2, 17].into_iter().collect();
+    let wildcard_attrs: std::collections::HashSet<u16> = [1, 2, 7, 17].into_iter().collect();
 
     let mut id_keys: IndexMap<u16, Vec<Vec<u16>>> = IndexMap::new();
     let id_pos = keyformat.iter().position(|t| *t == 17);
@@ -634,12 +633,65 @@ fn png_dimensions(path: &Path) -> Option<(u32, u32)> {
     Some((info.width, info.height))
 }
 
-/// Scale a PNG image to the requested dimensions and write it as PNG.
+/// Scale a PNG image to the requested dimensions and write it as an RGBA PNG
+/// with sRGB and EXIF chunks, matching Apple actool's loose icon output.
 fn scale_png(src: &Path, dest: &Path, width: u32, height: u32) -> Result<()> {
     let img = image::open(src)?;
     let resized = img.resize(width, height, image::imageops::FilterType::Lanczos3);
-    resized.save(dest)?;
+    let rgba = resized.to_rgba8();
+
+    let exif = build_exif_dimensions(width, height);
+    let file = fs::File::create(dest)?;
+    let mut encoder = png::Encoder::new(file, width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.set_compression(png::Compression::Fast);
+    encoder.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
+    let mut writer = encoder.write_header()?;
+    writer.write_chunk(png::chunk::ChunkType(*b"eXIf"), &exif)?;
+    writer.write_image_data(rgba.as_raw())?;
     Ok(())
+}
+
+/// Build the minimal EXIF blob Apple actool embeds in loose app-icon PNGs:
+/// ColorSpace = sRGB, PixelXDimension, PixelYDimension.
+fn build_exif_dimensions(width: u32, height: u32) -> Vec<u8> {
+    use byteorder::{BigEndian, WriteBytesExt};
+    let mut buf = Vec::new();
+    // TIFF header (big-endian)
+    buf.extend_from_slice(b"MM");
+    buf.write_u16::<BigEndian>(0x002a).unwrap();
+    buf.write_u32::<BigEndian>(8).unwrap(); // IFD0 offset
+
+    // IFD0: one entry pointing to the ExifIFD.
+    buf.write_u16::<BigEndian>(1).unwrap();
+    buf.write_u16::<BigEndian>(0x8769).unwrap(); // ExifIFD pointer
+    buf.write_u16::<BigEndian>(4).unwrap();      // LONG
+    buf.write_u32::<BigEndian>(1).unwrap();
+    buf.write_u32::<BigEndian>(26).unwrap();     // ExifIFD offset
+    buf.write_u32::<BigEndian>(0).unwrap();      // next IFD
+
+    // ExifIFD at offset 26: ColorSpace, PixelXDimension, PixelYDimension.
+    buf.write_u16::<BigEndian>(3).unwrap();
+    // ColorSpace = 1 (sRGB)
+    buf.write_u16::<BigEndian>(0xa001).unwrap();
+    buf.write_u16::<BigEndian>(3).unwrap(); // SHORT
+    buf.write_u32::<BigEndian>(1).unwrap();
+    buf.write_u16::<BigEndian>(1).unwrap();
+    buf.write_u16::<BigEndian>(0).unwrap(); // padding
+    // PixelXDimension
+    buf.write_u16::<BigEndian>(0xa002).unwrap();
+    buf.write_u16::<BigEndian>(4).unwrap(); // LONG
+    buf.write_u32::<BigEndian>(1).unwrap();
+    buf.write_u32::<BigEndian>(width).unwrap();
+    // PixelYDimension
+    buf.write_u16::<BigEndian>(0xa003).unwrap();
+    buf.write_u16::<BigEndian>(4).unwrap(); // LONG
+    buf.write_u32::<BigEndian>(1).unwrap();
+    buf.write_u32::<BigEndian>(height).unwrap();
+    buf.write_u32::<BigEndian>(0).unwrap(); // next IFD
+
+    buf
 }
 
 /// CFBundleIconFiles base name (`AppIcon60x60`) for an idiom's primary icon,

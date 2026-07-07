@@ -89,7 +89,7 @@ fn build_tvos_brandassets(root: &Path) {
 fn compile_tvos(xcassets: &Path, out: &Path) {
     let plist = out.join("partial.plist");
     compiler::compile_catalog(
-        xcassets,
+        &[xcassets.to_path_buf()],
         out,
         "appletvos",
         "17.0",

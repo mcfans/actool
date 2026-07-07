@@ -56,7 +56,7 @@ fn build_mixed_catalog(root: &Path) {
 fn compile_ios(xcassets: &Path, out: &Path) {
     let plist = out.join("partial.plist");
     compiler::compile_catalog(
-        xcassets,
+        &[xcassets.to_path_buf()],
         out,
         "iphoneos",
         "14.0",
@@ -101,7 +101,7 @@ fn build_appicon_catalog(root: &Path, entries: &[(&str, &str, &str)]) {
 fn compile_ios_icon(xcassets: &Path, out: &Path) {
     let plist = out.join("partial.plist");
     compiler::compile_catalog(
-        xcassets,
+        &[xcassets.to_path_buf()],
         out,
         "iphoneos",
         "14.0",
@@ -549,10 +549,11 @@ fn ios_appicon_single_size() {
     let kf = keyformat(&car);
     assert_eq!(kf, vec![7, 13, 12, 15, 16, 9, 17, 1, 2]);
 
-    // Single-size iOS uses the legacy 972 / key-semantics 1 header.
+    // Modern iOS actool uses CoreUI 975 / key-semantics 2 even for single-size
+    // app icons.
     let h = car.windows(4).position(|w| w == b"RATC").expect("CARHEADER");
-    assert_eq!(read_u32_le(&car, h + 4), 972, "single-size CoreUI version");
-    assert_eq!(read_u32_le(&car, h + 432), 1, "single-size key semantics");
+    assert_eq!(read_u32_le(&car, h + 4), 975, "single-size CoreUI version");
+    assert_eq!(read_u32_le(&car, h + 432), 2, "single-size key semantics");
 
     let scale_col = kf.iter().position(|t| *t == 12).unwrap();
     let idiom_col = kf.iter().position(|t| *t == 15).unwrap();

@@ -53,6 +53,14 @@ impl BomWriter {
         // Node header: isLeaf(2) + count(2) + forward(4) + backward(4) = 12 bytes
         let max_per_node = ((block_size as usize) - 12) / 8;
 
+        // Fixed-key trees (RENDITIONS) use the caller-supplied key width.
+        // Variable-key trees (FACETKEYS, APPEARANCEKEYS) still carry an
+        // inline-key region whose width equals the longest key in the tree;
+        // CUICatalog reads that region when enumerating facets/appearances.
+        let effective_key_size = self.inline_key_size.unwrap_or_else(|| {
+            entries.iter().map(|(k, _)| k.len()).max().unwrap_or(0)
+        });
+
         if entries.is_empty() {
             let mut node = Vec::with_capacity(block_size as usize);
             node.write_u16::<BigEndian>(1).unwrap();
@@ -62,7 +70,7 @@ impl BomWriter {
             node.resize(block_size as usize, 0);
             let node_idx = self.add_block(node);
             let tree_hdr =
-                build_tree_header(node_idx, block_size, 0, 0, self.tree_key_size());
+                build_tree_header(node_idx, block_size, 0, 0, effective_key_size as u32);
             let tree_idx = self.add_block(tree_hdr);
             self.named_blocks.insert(name.to_string(), tree_idx);
             return tree_idx;
@@ -72,14 +80,20 @@ impl BomWriter {
             entries.chunks(max_per_node).collect();
 
         if leaf_batches.len() == 1 {
-            let node = self.build_leaf_node(leaf_batches[0], 0, 0, block_size);
+            let node = self.build_leaf_node(
+                leaf_batches[0],
+                0,
+                0,
+                block_size,
+                Some(effective_key_size),
+            );
             let node_idx = self.add_block(node);
             let tree_hdr = build_tree_header(
                 node_idx,
                 block_size,
                 entries.len() as u32,
                 0,
-                self.tree_key_size(),
+                effective_key_size as u32,
             );
             let tree_idx = self.add_block(tree_hdr);
             self.named_blocks.insert(name.to_string(), tree_idx);
@@ -99,7 +113,7 @@ impl BomWriter {
                 0
             };
             let bwd = if i > 0 { leaf_indices[i - 1] as u32 } else { 0 };
-            let node = self.build_leaf_node(batch, fwd, bwd, block_size);
+            let node = self.build_leaf_node(batch, fwd, bwd, block_size, Some(effective_key_size));
             self.blocks[leaf_indices[i]] = node;
         }
 
@@ -127,19 +141,13 @@ impl BomWriter {
             block_size,
             entries.len() as u32,
             0,
-            self.tree_key_size(),
+            effective_key_size as u32,
         );
         let tree_idx = self.add_block(tree_hdr);
         self.named_blocks.insert(name.to_string(), tree_idx);
         tree_idx
     }
 
-    fn tree_key_size(&self) -> u32 {
-        match self.inline_key_size {
-            Some(n) => n as u32,
-            None => 0xFFFFFFFF,
-        }
-    }
 
     fn build_leaf_node(
         &mut self,
@@ -147,6 +155,7 @@ impl BomWriter {
         forward: u32,
         backward: u32,
         block_size: u32,
+        inline_key_size: Option<usize>,
     ) -> Vec<u8> {
         let mut node = Vec::new();
         node.write_u16::<BigEndian>(1).unwrap(); // isLeaf
@@ -159,17 +168,16 @@ impl BomWriter {
             let key_idx = self.add_block(key_data.clone());
             node.write_u32::<BigEndian>(val_idx as u32).unwrap();
             node.write_u32::<BigEndian>(key_idx as u32).unwrap();
-            if self.inline_key_size.is_some() {
+            if let Some(ks) = inline_key_size {
                 key_blob.extend_from_slice(key_data);
+                let pad = ks.saturating_sub(key_data.len());
+                key_blob.resize(key_blob.len() + pad, 0);
             }
         }
-        // For fixed-key trees (RENDITIONS, APPEARANCEKEYS), Apple inlines
-        // each rendition key immediately after the entries — CUICatalog
-        // reads keys from this packed region rather than chasing key block
-        // pointers, so the order and adjacency to entries matters. Without
-        // this, `imagesWithName:` silently returns empty arrays even when
-        // every separate key block is correct. A 4-byte zero gap separates
-        // the entry table from the inline-key region.
+        // For fixed-key trees (RENDITIONS) and variable-key trees whose keys
+        // are padded to a common width, Apple inlines each key immediately
+        // after the entries. A 4-byte zero gap separates the entry table from
+        // the inline-key region.
         if !key_blob.is_empty() {
             node.extend_from_slice(&[0u8; 4]);
             node.extend_from_slice(&key_blob);
@@ -179,7 +187,7 @@ impl BomWriter {
         }
         // After the inline-key region the leaf is padded with zeros until
         // total length = block_size + n_entries * fixed_key_size.
-        if let Some(ks) = self.inline_key_size {
+        if let Some(ks) = inline_key_size {
             let target = block_size as usize + entries.len() * ks;
             if node.len() < target {
                 node.resize(target, 0);
