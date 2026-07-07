@@ -15,6 +15,80 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Relative path from a Developer directory to the CoreUI framework used by
+/// actool at runtime.
+const XCODE_COREUI_INFO_PLIST: &str =
+    "Platforms/MacOSX.platform/System/AssetRuntime/System/Library/PrivateFrameworks/CoreUI.framework/Resources/Info.plist";
+
+/// Fallback host CoreUI framework path (older / non-Xcode layouts).
+const SYSTEM_COREUI_INFO_PLIST: &str =
+    "/System/Library/PrivateFrameworks/CoreUI.framework/Resources/Info.plist";
+
+fn coreui_version_from_plist(path: &std::path::Path) -> Option<u32> {
+    let value = plist::Value::from_file(path).ok()?;
+    let dict = value.as_dictionary()?;
+    let version_str = dict.get("CFBundleVersion")?.as_string()?;
+    version_str.split('.').next()?.parse::<u32>().ok()
+}
+
+/// Try to read the CoreUI framework version that Apple actool would use.
+/// On macOS this is the version bundled with the active Xcode toolchain
+/// (under `Platforms/MacOSX.platform/System/AssetRuntime`), not the host
+/// system CoreUI. Falls back to the system framework when the Xcode one is not
+/// present.
+fn detect_host_coreui_version() -> Option<u32> {
+    // Honor DEVELOPER_DIR like xcrun does.
+    let developer_dir = std::env::var_os("DEVELOPER_DIR")
+        .map(PathBuf::from)
+        .or_else(|| {
+            // Not set; ask xcode-select for the active developer directory.
+            std::process::Command::new("xcode-select")
+                .arg("-p")
+                .output()
+                .ok()
+                .and_then(|out| {
+                    if out.status.success() {
+                        Some(PathBuf::from(String::from_utf8_lossy(&out.stdout,
+                        ).trim()))
+                    } else {
+                        None
+                    }
+                })
+        })?;
+
+    let xcode_plist = developer_dir.join(XCODE_COREUI_INFO_PLIST);
+    if let Some(v) = coreui_version_from_plist(&xcode_plist) {
+        return Some(v);
+    }
+
+    coreui_version_from_plist(Path::new(SYSTEM_COREUI_INFO_PLIST))
+}
+
+/// Resolve the CoreUI version to write into the CAR header.
+///
+/// Priority:
+/// 1. Explicit `--coreui-version` CLI flag.
+/// 2. `ACTOOL_COREUI_VERSION` environment variable.
+/// 3. Host CoreUI framework version on macOS.
+/// 4. Sensible default based on the target platform.
+fn resolve_coreui_version(_platform: &str, explicit: Option<u32>) -> u32 {
+    if let Some(v) = explicit {
+        return v;
+    }
+    if let Ok(v) = std::env::var("ACTOOL_COREUI_VERSION") {
+        if let Ok(n) = v.parse::<u32>() {
+            return n;
+        }
+    }
+    if let Some(v) = detect_host_coreui_version() {
+        return v;
+    }
+    // Default matching modern iOS/tvOS/macOS SDKs. Apple actool uses the
+    // host CoreUI version when available, so this fallback only applies on
+    // non-macOS hosts where no override is supplied.
+    972
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn compile_catalog(
     xcassets_paths: &[PathBuf],
@@ -29,6 +103,7 @@ pub fn compile_catalog(
     include_languages: Option<Vec<String>>,
     development_region: Option<String>,
     plist_localizations: bool,
+    coreui_version: Option<u32>,
 ) -> Result<Vec<PathBuf>> {
     fs::create_dir_all(output_dir)?;
     let has_icon = app_icon.is_some();
@@ -310,18 +385,17 @@ pub fn compile_catalog(
     all_entries.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut bom = BomWriter::new();
-    // iOS catalogs declare key-semantics 2 (idiom-aware keys). The CoreUI
-    // version is 975 when a single .xcassets document is compiled on its own,
-    // but drops to 972 when multiple catalogs are passed on the same command
-    // line (Apple merges them into a single compilation unit). macOS and tvOS
-    // stay on the legacy 972 / key-semantics 1 pairing.
-    let (coreui_ver, key_semantics) = if platform == "appletvos" || platform == "appletvsimulator" {
-        (972, 1)
-    } else if car::is_idiom_platform(platform) {
-        let ver = if xcassets_paths.len() == 1 { 975 } else { 972 };
-        (ver, 2)
+    // iOS catalogs declare key-semantics 2 (idiom-aware keys). macOS and tvOS
+    // stay on the legacy key-semantics 1 pairing. The CoreUI format version
+    // normally comes from the host CoreUI framework on macOS, so we mirror that
+    // by detecting it; callers can override with --coreui-version or the
+    // ACTOOL_COREUI_VERSION environment variable for reproducible cross-platform
+    // builds.
+    let coreui_ver = resolve_coreui_version(platform, coreui_version);
+    let key_semantics = if platform == "iphoneos" || platform == "iphonesimulator" {
+        2
     } else {
-        (972, 1)
+        1
     };
     bom.add_named_block(
         "CARHEADER",

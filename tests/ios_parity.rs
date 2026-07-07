@@ -68,6 +68,7 @@ fn compile_ios(xcassets: &Path, out: &Path) {
         None,
         None,
         true,
+        Some(975),
     )
     .expect("compile");
 }
@@ -113,6 +114,7 @@ fn compile_ios_icon(xcassets: &Path, out: &Path) {
         None,
         None,
         true,
+        Some(975),
     )
     .expect("compile");
 }

@@ -39,6 +39,7 @@ fn compile_reference_catalog_produces_outputs() {
         None,
         None,
         true,
+        None,
     )
     .expect("compile");
     assert!(files.iter().any(|p| p.ends_with("Assets.car")));
@@ -71,6 +72,7 @@ fn compile_reference_catalog_without_icon() {
         None,
         None,
         true,
+        None,
     )
     .expect("compile");
     assert!(files.iter().any(|p| p.ends_with("Assets.car")));

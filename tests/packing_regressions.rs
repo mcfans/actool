@@ -103,6 +103,7 @@ fn lone_ga8_stored_inline() {
         None,
         None,
         true,
+        None,
     )
     .expect("compile");
     let layouts = parse_car_layouts(&out.join("Assets.car"));
@@ -118,6 +119,7 @@ fn single_imageset_stored_inline() {
     let out = tmp.join("out");
     compiler::compile_catalog(
         &[catalog], &out, "macosx", "11.0", None, None, None, None, "default", None, None, true,
+        None,
     )
     .expect("compile");
     let layouts = parse_car_layouts(&out.join("Assets.car"));
@@ -134,6 +136,7 @@ fn all_same_format_packed() {
     let out = tmp.join("out");
     compiler::compile_catalog(
         &[catalog], &out, "macosx", "11.0", None, None, None, None, "default", None, None, true,
+        None,
     )
     .expect("compile");
     let layouts = parse_car_layouts(&out.join("Assets.car"));
@@ -154,6 +157,7 @@ fn two_formats_one_each_both_inline() {
     let out = tmp.join("out");
     compiler::compile_catalog(
         &[catalog], &out, "macosx", "11.0", None, None, None, None, "default", None, None, true,
+        None,
     )
     .expect("compile");
     let layouts = parse_car_layouts(&out.join("Assets.car"));

@@ -101,6 +101,7 @@ fn compile_tvos(xcassets: &Path, out: &Path) {
         None,
         None,
         true,
+        Some(972),
     )
     .expect("compile");
 }

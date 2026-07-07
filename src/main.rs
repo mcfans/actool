@@ -55,6 +55,11 @@ struct Cli {
     #[arg(long, default_value = "11.0")]
     minimum_deployment_target: String,
 
+    /// Override the CoreUI format version written into the CAR header.
+    /// Defaults to the host CoreUI framework version on macOS, otherwise 972.
+    #[arg(long)]
+    coreui_version: Option<u32>,
+
     #[arg(long, action = clap::ArgAction::Append, default_value = "")]
     target_device: Vec<String>,
 
@@ -228,6 +233,7 @@ fn main() -> ExitCode {
             include_languages,
             cli.development_region.clone(),
             plist_l10n,
+            cli.coreui_version,
         ) {
             Ok(f) => f,
             Err(e) => {
