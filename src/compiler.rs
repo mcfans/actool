@@ -278,8 +278,13 @@ pub fn compile_catalog(
 
     let mut bom = BomWriter::new();
     // iOS catalogs declare CoreUI 975 and key-semantics 2 (idiom-aware keys);
-    // macOS stays on the legacy 972 / key-semantics 1 pairing.
-    let (coreui_ver, key_semantics) = if car::is_idiom_platform(platform) {
+    // macOS stays on the legacy 972 / key-semantics 1 pairing. tvOS and
+    // Xcode 14+ single-size iOS app icons use the legacy 972 / 1 pairing.
+    let (coreui_ver, key_semantics) = if catalog.is_single_size_ios_appicon() {
+        (972, 1)
+    } else if platform == "appletvos" || platform == "appletvsimulator" {
+        (972, 1)
+    } else if car::is_idiom_platform(platform) {
         (975, 2)
     } else {
         (972, 1)
@@ -364,7 +369,16 @@ pub fn compile_catalog(
             // at @2x) alongside the CAR — not as an .icns bundle.
             for loose in ios_loose_icons(&catalog.get_appicon_images()?, icon_name) {
                 let dest = output_dir.join(&loose.filename);
-                fs::copy(&loose.src, &dest)?;
+                let expected_px = loose.point_w * loose.scale;
+                if let Some((src_w, src_h)) = png_dimensions(&loose.src) {
+                    if src_w != expected_px || src_h != expected_px {
+                        scale_png(&loose.src, &dest, expected_px, expected_px)?;
+                    } else {
+                        fs::copy(&loose.src, &dest)?;
+                    }
+                } else {
+                    fs::copy(&loose.src, &dest)?;
+                }
                 output_files.push(fs::canonicalize(&dest).unwrap_or(dest));
             }
         } else if standalone_icon_behavior != "none" {
@@ -387,7 +401,19 @@ pub fn compile_catalog(
         } else {
             Vec::new()
         };
-        if let (true, Some(icon_name)) = (car::is_idiom_platform(platform), app_icon) {
+        if platform == "appletvos" || platform == "appletvsimulator" {
+            if let Some(icon_name) = app_icon {
+                write_tvos_icon_plist(path, icon_name)?;
+            } else {
+                write_info_plist(
+                    path,
+                    app_icon,
+                    accent_color,
+                    widget_background_color,
+                    &locales,
+                )?;
+            }
+        } else if let (true, Some(icon_name)) = (car::is_idiom_platform(platform), app_icon) {
             write_ios_icon_plist(path, icon_name, &catalog.get_appicon_images()?)?;
         } else {
             write_info_plist(
@@ -528,6 +554,8 @@ fn ios_primary_size(idiom: &str) -> Option<u32> {
 struct LooseIcon {
     filename: String,
     src: PathBuf,
+    point_w: u32,
+    scale: u32,
 }
 
 /// Loose home-screen PNGs actool drops next to the CAR: the @2x primary icon
@@ -553,9 +581,28 @@ fn ios_loose_icons(icons: &[IconImage], name: &str) -> Vec<LooseIcon> {
         out.push(LooseIcon {
             filename: format!("{name}{primary}x{primary}@2x{suffix}.{ext}"),
             src: img.path.clone(),
+            point_w: primary,
+            scale: 2,
         });
     }
     out
+}
+
+/// Read the width/height of a PNG file without decoding pixels.
+fn png_dimensions(path: &Path) -> Option<(u32, u32)> {
+    let file = std::fs::File::open(path).ok()?;
+    let reader = std::io::BufReader::new(file);
+    let mut decoder = png::Decoder::new(reader);
+    let info = decoder.read_header_info().ok()?;
+    Some((info.width, info.height))
+}
+
+/// Scale a PNG image to the requested dimensions and write it as PNG.
+fn scale_png(src: &Path, dest: &Path, width: u32, height: u32) -> Result<()> {
+    let img = image::open(src)?;
+    let resized = img.resize(width, height, image::imageops::FilterType::Lanczos3);
+    resized.save(dest)?;
+    Ok(())
 }
 
 /// CFBundleIconFiles base name (`AppIcon60x60`) for an idiom's primary icon,
@@ -621,6 +668,33 @@ fn write_ios_icon_plist(path: &Path, name: &str, icons: &[IconImage]) -> Result<
     lines.push("</dict>".to_string());
     lines.push("</plist>".to_string());
     lines.push(String::new());
+    fs::write(path, lines.join("\n"))?;
+    Ok(())
+}
+
+/// tvOS partial Info.plist: a `CFBundleIcons` dict whose primary icon is the
+/// icon name as a string. Unlike iOS, tvOS does not list icon files or emit
+/// a separate `CFBundleIcons~ipad` key.
+fn write_tvos_icon_plist(path: &Path, name: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    let lines = vec![
+        r#"<?xml version="1.0" encoding="UTF-8"?>"#.to_string(),
+        r#"<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">"#.to_string(),
+        r#"<plist version="1.0">"#.to_string(),
+        "<dict>".to_string(),
+        "\t<key>CFBundleIcons</key>".to_string(),
+        "\t<dict>".to_string(),
+        "\t\t<key>CFBundlePrimaryIcon</key>".to_string(),
+        format!("\t\t<string>{name}</string>"),
+        "\t</dict>".to_string(),
+        "</dict>".to_string(),
+        "</plist>".to_string(),
+        String::new(),
+    ];
     fs::write(path, lines.join("\n"))?;
     Ok(())
 }

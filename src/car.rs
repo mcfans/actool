@@ -40,19 +40,27 @@ where
 }
 
 /// True for the device-family platforms whose catalogs encode idiom in the
-/// rendition key (iOS and its simulator). macOS keeps the legacy layout.
+/// rendition key (iOS/tvOS and their simulators). macOS keeps the legacy layout.
 pub fn is_idiom_platform(platform: &str) -> bool {
-    matches!(platform, "iphoneos" | "iphonesimulator")
+    matches!(platform, "iphoneos" | "iphonesimulator" | "appletvos" | "appletvsimulator")
 }
 
 /// CoreUI deployment-platform string written into EXTENDED_METADATA. actool
-/// records the device family ("ios"), not the SDK name ("iphoneos").
+/// records the device family ("ios" / "atv"), not the SDK name
+/// ("iphoneos" / "appletvos").
 pub fn deployment_platform_name(platform: &str) -> &str {
     match platform {
         "iphoneos" | "iphonesimulator" => "ios",
+        "appletvos" | "appletvsimulator" => "atv",
         other => other,
     }
 }
+
+/// Dimension2 index used for the 1024pt source in Xcode 14+ single-size
+/// iOS app icons. The single 1024 source is shared by both phone and pad
+/// facets and uses index 1 rather than the multi-size marketing 1024 slot
+/// (which is 8).
+pub const IOS_ICON_DIM2_SINGLE_SIZE_1024: u16 = 1;
 
 /// Numeric value for an asset-catalog `idiom` string, as encoded in rendition
 /// key attribute 15. Values match CoreUI's `kCoreThemeIdiom*` enum.

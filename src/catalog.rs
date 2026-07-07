@@ -66,6 +66,39 @@ fn premultiply_bgra(mut buf: Vec<u8>) -> Vec<u8> {
     buf
 }
 
+/// Alpha-composite `src` over `dst` in straight-alpha RGBA space.
+fn alpha_blend(dst: image::Rgba<u8>, src: image::Rgba<u8>) -> image::Rgba<u8> {
+    let image::Rgba([sr, sg, sb, sa]) = src;
+    let image::Rgba([dr, dg, db, da]) = dst;
+    if sa == 255 {
+        return src;
+    }
+    if sa == 0 {
+        return dst;
+    }
+    let sa_f = sa as f32 / 255.0;
+    let inv_sa = 1.0 - sa_f;
+    let a = sa + ((da as f32 * inv_sa) as u8);
+    let r = (sr as f32 * sa_f + dr as f32 * inv_sa) as u8;
+    let g = (sg as f32 * sa_f + dg as f32 * inv_sa) as u8;
+    let b = (sb as f32 * sa_f + db as f32 * inv_sa) as u8;
+    image::Rgba([r, g, b, a])
+}
+
+/// Convert RGBA pixels to BGRA (without premultiplying; caller handles
+/// premultiplication via `bgra_to_best_format`/`premultiply_bgra`).
+fn rgba_to_bgra(rgba: &image::RgbaImage) -> Vec<u8> {
+    let mut bgra = Vec::with_capacity((rgba.width() * rgba.height() * 4) as usize);
+    for px in rgba.pixels() {
+        let image::Rgba([r, g, b, a]) = *px;
+        bgra.push(b);
+        bgra.push(g);
+        bgra.push(r);
+        bgra.push(a);
+    }
+    bgra
+}
+
 fn premultiply_ga8(mut buf: Vec<u8>) -> Vec<u8> {
     for chunk in buf.chunks_exact_mut(2) {
         let a = chunk[1];
@@ -273,6 +306,10 @@ pub struct AssetCatalog {
     /// Entries are `(imageset_stem, source_path)`.
     pub loose_jpegs: Vec<(String, PathBuf)>,
     jpeg_in_car: bool,
+    /// True when the parsed app icon set uses the Xcode 14+ single-size iOS
+    /// format: one 1024x1024 source shared by phone and pad. This affects
+    /// Dimension2 indexing, CoreUI header versioning, and loose-PNG scaling.
+    single_size_ios_appicon: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -321,6 +358,7 @@ impl AssetCatalog {
             force_bgra,
             loose_jpegs: Vec::new(),
             jpeg_in_car,
+            single_size_ios_appicon: false,
         }
     }
 
@@ -328,6 +366,40 @@ impl AssetCatalog {
         let mut v: Vec<_> = self.locales_used.iter().cloned().collect();
         v.sort();
         v
+    }
+
+    /// True when an appiconset entry matches the Xcode 14+ single-size iOS
+    /// format: a 1024x1024 raster source marked with `"platform": "ios"` and
+    /// `"idiom": "universal"` (and typically no explicit scale).
+    fn is_single_size_ios_entry(&self, img_info: &Value) -> bool {
+        if !car::is_idiom_platform(&self.platform) {
+            return false;
+        }
+        let platform = img_info
+            .get("platform")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if platform != "ios" {
+            return false;
+        }
+        let idiom = img_info
+            .get("idiom")
+            .and_then(|v| v.as_str())
+            .unwrap_or("universal");
+        if idiom != "universal" {
+            return false;
+        }
+        let size_str = img_info.get("size").and_then(|v| v.as_str()).unwrap_or("");
+        let point_w: u32 = size_str
+            .split_once('x')
+            .and_then(|(w, _)| w.parse::<f64>().ok())
+            .map(|f| f.floor() as u32)
+            .unwrap_or(0);
+        point_w == 1024
+    }
+
+    pub fn is_single_size_ios_appicon(&self) -> bool {
+        self.single_size_ios_appicon
     }
 
     fn get_identifier(&mut self, name: &str) -> u16 {
@@ -387,7 +459,8 @@ impl AssetCatalog {
                 "colorset" => self.parse_colorset(&item, renditions, facets, namespace)?,
                 "dataset" => self.parse_dataset(&item, renditions, facets, namespace)?,
                 "spriteatlas" => self.parse_spriteatlas(&item, renditions, facets)?,
-                "imagestack" => self.parse_imagestack(&item, renditions, facets)?,
+                "imagestack" => self.parse_imagestack(&item, renditions, facets, namespace)?,
+                "brandassets" => self.parse_brandassets(&item, renditions, facets)?,
                 "" if item.is_dir() => {
                     let mut child_ns = namespace.to_string();
                     let group_json = item.join("Contents.json");
@@ -759,7 +832,14 @@ impl AssetCatalog {
                 .get("platform")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            if !img_platform.is_empty() && img_platform != self.platform {
+            let is_single_size = self.is_single_size_ios_entry(img_info);
+            if is_single_size {
+                self.single_size_ios_appicon = true;
+            }
+            if !img_platform.is_empty()
+                && img_platform != self.platform
+                && !(is_single_size && car::is_idiom_platform(&self.platform))
+            {
                 continue;
             }
 
@@ -854,16 +934,26 @@ impl AssetCatalog {
 
             let (pixel_data, width, height, pixel_format) =
                 load_image_as_bgra(&img_path, self.force_bgra)?;
-            let dim2 = self.icon_size_index(point_w);
+            let dim2 = if is_single_size {
+                car::IOS_ICON_DIM2_SINGLE_SIZE_1024
+            } else {
+                self.icon_size_index(point_w)
+            };
+            let scale_u16 = if is_single_size { 1u16 } else { scale as u16 };
+            let first_idiom = if is_single_size {
+                car::idiom_value("iphone")
+            } else {
+                idiom_num
+            };
             renditions.push(Rendition {
                 name: filename.to_string(),
                 identifier: ident,
                 element: car::ELEMENT_UNIVERSAL,
                 part: car::PART_ICON,
-                scale: scale as u16,
+                scale: scale_u16,
                 width,
                 height,
-                pixel_data,
+                pixel_data: pixel_data.clone(),
                 pixel_format,
                 layout: car::LAYOUT_ONE_PART_SCALE,
                 dim2,
@@ -873,8 +963,33 @@ impl AssetCatalog {
                 platform: self.platform.clone(),
                 ..Rendition::default()
             });
-            stamp_idiom(renditions, icon_rend_start, idiom_num);
-            icon_renditions.push((point_w, idiom_num, 0));
+            stamp_idiom(renditions, icon_rend_start, first_idiom);
+            icon_renditions.push((point_w, first_idiom, 0));
+            if is_single_size {
+                // Single-size iOS app icons share the 1024 source across both
+                // phone and pad idioms. Emit a second rendition with pad idiom.
+                let pad_idiom = car::idiom_value("ipad");
+                renditions.push(Rendition {
+                    name: filename.to_string(),
+                    identifier: ident,
+                    element: car::ELEMENT_UNIVERSAL,
+                    part: car::PART_ICON,
+                    scale: scale_u16,
+                    width,
+                    height,
+                    pixel_data: pixel_data.clone(),
+                    pixel_format,
+                    layout: car::LAYOUT_ONE_PART_SCALE,
+                    dim2,
+                    template_rendering_intent: 0,
+                    colorspace_id: car::colorspace_for_pixel_format(&pixel_format),
+                    min_deploy: self.min_deploy.clone(),
+                    platform: self.platform.clone(),
+                    ..Rendition::default()
+                });
+                stamp_idiom(renditions, icon_rend_start + 1, pad_idiom);
+                icon_renditions.push((point_w, pad_idiom, 0));
+            }
         }
 
         if icon_renditions.is_empty() {
@@ -884,7 +999,8 @@ impl AssetCatalog {
         // iPhone Plus/Max: actool synthesizes a 90pt@2x icon (subtype 1792)
         // by reusing the 60pt@3x source — both are 180px — whenever that icon
         // is present. It also gets its own phone/subtype-1792 multisize facet.
-        if car::is_idiom_platform(&self.platform) {
+        // Single-size iOS icons skip this synthesis.
+        if car::is_idiom_platform(&self.platform) && !self.single_size_ios_appicon {
             let dim2_60 = self.icon_size_index(60);
             let src = renditions[appicon_start..]
                 .iter()
@@ -928,7 +1044,11 @@ impl AssetCatalog {
                 .map(|w| MultisizeImageEntry {
                     width: *w,
                     height: *w,
-                    index: self.icon_size_index(*w) as u32,
+                    index: if self.single_size_ios_appicon {
+                        car::IOS_ICON_DIM2_SINGLE_SIZE_1024 as u32
+                    } else {
+                        self.icon_size_index(*w) as u32
+                    },
                 })
                 .collect();
             let mut ms_rend = car::build_multisize_rendition(&name, ident, &ms_entries);
@@ -1247,8 +1367,14 @@ impl AssetCatalog {
         item: &Path,
         renditions: &mut Vec<Rendition>,
         facets: &mut IndexMap<String, Facet>,
+        namespace: &str,
     ) -> Result<()> {
         let stack_name = item.file_stem().unwrap_or_default().to_string_lossy().to_string();
+        let facet_prefix = if namespace.is_empty() {
+            stack_name.clone()
+        } else {
+            format!("{namespace}{stack_name}")
+        };
         let contents_path = item.join("Contents.json");
         if !contents_path.exists() {
             return Ok(());
@@ -1274,7 +1400,7 @@ impl AssetCatalog {
                 if !content_imageset.exists() {
                     continue;
                 }
-                let full = format!("{stack_name}/{layer_name}/Content");
+                let full = format!("{facet_prefix}/{layer_name}/Content");
                 let layer_ident = self.get_identifier(&full);
                 let img_contents_path = content_imageset.join("Contents.json");
                 if !img_contents_path.exists() {
@@ -1304,7 +1430,16 @@ impl AssetCatalog {
                         {
                             continue;
                         }
+                        // tvOS imagestack layers use the "tv" idiom.
+                        let idiom_num = if self.platform == "appletvos"
+                            || self.platform == "appletvsimulator"
+                        {
+                            car::idiom_value(idiom)
+                        } else {
+                            0
+                        };
                         let (pd, w, h, pf) = load_image_as_bgra(&p, false)?;
+                        let img_rend_start = renditions.len();
                         renditions.push(Rendition {
                             name: filename.to_string(),
                             identifier: layer_ident,
@@ -1321,6 +1456,7 @@ impl AssetCatalog {
                             platform: self.platform.clone(),
                             ..Rendition::default()
                         });
+                        stamp_idiom(renditions, img_rend_start, idiom_num);
                     }
                 }
                 facets.insert(
@@ -1333,6 +1469,180 @@ impl AssetCatalog {
                 );
             }
         }
+        Ok(())
+    }
+
+    /// Parse a tvOS `.brandassets` container. Only the primary app-icon
+    /// imagestack is handled for now; top-shelf images are skipped.
+    fn parse_brandassets(
+        &mut self,
+        item: &Path,
+        renditions: &mut Vec<Rendition>,
+        facets: &mut IndexMap<String, Facet>,
+    ) -> Result<()> {
+        if self.platform != "appletvos" && self.platform != "appletvsimulator" {
+            return Ok(());
+        }
+        let contents_path = item.join("Contents.json");
+        if !contents_path.exists() {
+            return Ok(());
+        }
+        let contents = read_json(&contents_path)?;
+        let Some(assets) = contents.get("assets").and_then(|v| v.as_array()) else {
+            return Ok(());
+        };
+        for asset in assets {
+            let Some(role) = asset.get("role").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            if role != "primary-app-icon" {
+                continue;
+            }
+            let Some(filename) = asset.get("filename").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let stack_path = item.join(filename);
+            if !stack_path.exists() {
+                continue;
+            }
+            // Parse the imagestack layers first so renditions/facets are
+            // registered, then composite a flattened icon on top.
+            self.parse_imagestack(&stack_path, renditions, facets, "")?;
+            self.composite_tvos_iconstack(&stack_path, renditions, facets)?;
+        }
+        Ok(())
+    }
+
+    /// Composite the layers of a tvOS imagestack into flattened 1x/2x
+    /// renditions and add them under the stack's facet name.
+    fn composite_tvos_iconstack(
+        &mut self,
+        stack_path: &Path,
+        renditions: &mut Vec<Rendition>,
+        facets: &mut IndexMap<String, Facet>,
+    ) -> Result<()> {
+        let stack_name = stack_path
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let contents_path = stack_path.join("Contents.json");
+        if !contents_path.exists() {
+            return Ok(());
+        }
+        let contents = read_json(&contents_path)?;
+        let Some(layers) = contents.get("layers").and_then(|v| v.as_array()) else {
+            return Ok(());
+        };
+
+        let mut layer_files: Vec<(Vec<PathBuf>, String)> = Vec::new();
+        for layer in layers {
+            let Some(layer_filename) = layer.get("filename").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let layer_path = stack_path.join(layer_filename);
+            if !layer_path.exists() {
+                continue;
+            }
+            let layer_name = Path::new(layer_filename)
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            let content_imageset = layer_path.join("Content.imageset");
+            if !content_imageset.exists() {
+                continue;
+            }
+            let img_contents_path = content_imageset.join("Contents.json");
+            if !img_contents_path.exists() {
+                continue;
+            }
+            let img_contents = read_json(&img_contents_path)?;
+            let mut files_at_scale: Vec<PathBuf> = Vec::new();
+            if let Some(arr) = img_contents.get("images").and_then(|v| v.as_array()) {
+                for img_info in arr {
+                    let Some(filename) = img_info.get("filename").and_then(|v| v.as_str())
+                    else {
+                        continue;
+                    };
+                    let p = content_imageset.join(filename);
+                    if !p.exists() {
+                        continue;
+                    }
+                    let idiom = img_info
+                        .get("idiom")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("universal");
+                    if idiom != "tv" && idiom != "universal" {
+                        continue;
+                    }
+                    files_at_scale.push(p);
+                }
+            }
+            if !files_at_scale.is_empty() {
+                layer_files.push((files_at_scale, layer_name));
+            }
+        }
+        if layer_files.is_empty() {
+            return Ok(());
+        }
+
+        // Determine stack size from the first layer's 1x image.
+        let first_path = &layer_files[0].0[0];
+        let base_img = image::open(first_path)?;
+        let base_w = base_img.width();
+        let base_h = base_img.height();
+
+        let stack_ident = self.get_identifier(&stack_name);
+        for scale in [1u32, 2] {
+            let px_w = base_w * scale;
+            let px_h = base_h * scale;
+            let mut canvas = image::RgbaImage::from_pixel(px_w, px_h, image::Rgba([0, 0, 0, 0]));
+            for (files, _layer_name) in &layer_files {
+                // Pick the image whose filename suggests the requested scale.
+                let chosen = files
+                    .iter()
+                    .find(|p| {
+                        let name = p.file_stem().unwrap_or_default().to_string_lossy();
+                        name.ends_with(&format!("@{}x", scale))
+                    })
+                    .or_else(|| files.first())
+                    .unwrap();
+                let layer_img = image::open(chosen)?;
+                let resized = layer_img.resize(px_w, px_h, image::imageops::FilterType::Lanczos3);
+                let rgba = resized.to_rgba8();
+                for (x, y, px) in rgba.enumerate_pixels() {
+                    let bottom = canvas.get_pixel(x, y);
+                    canvas.put_pixel(x, y, alpha_blend(*bottom, *px));
+                }
+            }
+            let (bgra, _, _, pf) = bgra_to_best_format(rgba_to_bgra(&canvas), px_w, px_h, false);
+            renditions.push(Rendition {
+                name: format!("ZZZZFlattenedImage-{}.{}.{}-gamut0", scale, 1, 0),
+                identifier: stack_ident,
+                element: car::ELEMENT_UNIVERSAL,
+                part: car::PART_REGULAR,
+                scale: scale as u16,
+                width: px_w,
+                height: px_h,
+                pixel_data: bgra,
+                pixel_format: pf,
+                layout: car::LAYOUT_ONE_PART_SCALE,
+                idiom: car::idiom_value("tv"),
+                colorspace_id: car::colorspace_for_pixel_format(&pf),
+                min_deploy: self.min_deploy.clone(),
+                platform: self.platform.clone(),
+                ..Rendition::default()
+            });
+        }
+        facets.insert(
+            stack_name,
+            Facet {
+                element: car::ELEMENT_UNIVERSAL,
+                part: Some(car::PART_REGULAR),
+                identifier: stack_ident,
+            },
+        );
         Ok(())
     }
 
@@ -1363,6 +1673,7 @@ impl AssetCatalog {
         }
         let contents = read_json(&contents_path)?;
         let mut result = Vec::new();
+        let mut single_size_src: Option<PathBuf> = None;
         if let Some(arr) = contents.get("images").and_then(|v| v.as_array()) {
             for img_info in arr {
                 let Some(filename) = img_info.get("filename").and_then(|v| v.as_str())
@@ -1371,6 +1682,10 @@ impl AssetCatalog {
                 };
                 let path = icon_dir.join(filename);
                 if !path.exists() {
+                    continue;
+                }
+                if self.is_single_size_ios_entry(img_info) {
+                    single_size_src = Some(path);
                     continue;
                 }
                 let idiom = img_info
@@ -1388,6 +1703,19 @@ impl AssetCatalog {
                     point_w,
                     scale: parse_scale(img_info),
                     path,
+                });
+            }
+        }
+        if let Some(src) = single_size_src {
+            // Single-size iOS app icons share one 1024 source across phone and
+            // pad; actool emits the primary home-screen sizes as loose PNGs by
+            // scaling that source.
+            for (idiom, point_w) in [("iphone", 60), ("ipad", 76)] {
+                result.push(IconImage {
+                    idiom: idiom.to_string(),
+                    point_w,
+                    scale: 2,
+                    path: src.clone(),
                 });
             }
         }
