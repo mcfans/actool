@@ -1535,7 +1535,7 @@ impl AssetCatalog {
             return Ok(());
         };
 
-        let mut layer_files: Vec<(Vec<PathBuf>, String)> = Vec::new();
+        let mut layer_files: Vec<(Vec<(PathBuf, u32)>, String)> = Vec::new();
         for layer in layers {
             let Some(layer_filename) = layer.get("filename").and_then(|v| v.as_str()) else {
                 continue;
@@ -1558,7 +1558,7 @@ impl AssetCatalog {
                 continue;
             }
             let img_contents = read_json(&img_contents_path)?;
-            let mut files_at_scale: Vec<PathBuf> = Vec::new();
+            let mut files_at_scale: Vec<(PathBuf, u32)> = Vec::new();
             if let Some(arr) = img_contents.get("images").and_then(|v| v.as_array()) {
                 for img_info in arr {
                     let Some(filename) = img_info.get("filename").and_then(|v| v.as_str())
@@ -1576,7 +1576,18 @@ impl AssetCatalog {
                     if idiom != "tv" && idiom != "universal" {
                         continue;
                     }
-                    files_at_scale.push(p);
+                    let declared = img_info
+                        .get("scale")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| s.trim_end_matches('x').parse().ok());
+                    let inferred = p.file_stem()
+                        .and_then(|s| s.to_str())
+                        .and_then(|s| {
+                            s.rsplit_once('@')
+                                .and_then(|(_, n)| n.trim_end_matches('x').parse().ok())
+                        });
+                    let scale = declared.or(inferred).unwrap_or(1);
+                    files_at_scale.push((p, scale));
                 }
             }
             if !files_at_scale.is_empty() {
@@ -1588,13 +1599,30 @@ impl AssetCatalog {
         }
 
         // Determine stack size from the first layer's 1x image.
-        let first_path = &layer_files[0].0[0];
-        let base_img = image::open(first_path)?;
+        let first_1x = layer_files[0]
+            .0
+            .iter()
+            .find(|(_, s)| *s == 1)
+            .map(|(p, _)| p)
+            .unwrap_or(&layer_files[0].0[0].0,
+            );
+        let base_img = image::open(first_1x)?;
         let base_w = base_img.width();
         let base_h = base_img.height();
 
-        let stack_ident = self.get_identifier(&stack_name);
+        // Only emit scales that every layer provides.
+        let mut common_scales: Vec<u32> = Vec::new();
         for scale in [1u32, 2] {
+            if layer_files.iter().all(|(files, _)| files.iter().any(|(_, s)| *s == scale)) {
+                common_scales.push(scale);
+            }
+        }
+        if common_scales.is_empty() {
+            common_scales.push(1);
+        }
+
+        let stack_ident = self.get_identifier(&stack_name);
+        for scale in common_scales {
             let px_w = base_w * scale;
             let px_h = base_h * scale;
             let mut canvas = image::RgbaImage::from_pixel(px_w, px_h, image::Rgba([0, 0, 0, 0]));
@@ -1602,11 +1630,9 @@ impl AssetCatalog {
                 // Pick the image whose filename suggests the requested scale.
                 let chosen = files
                     .iter()
-                    .find(|p| {
-                        let name = p.file_stem().unwrap_or_default().to_string_lossy();
-                        name.ends_with(&format!("@{}x", scale))
-                    })
-                    .or_else(|| files.first())
+                    .find(|(_, s)| *s == scale)
+                    .map(|(p, _)| p)
+                    .or_else(|| files.first().map(|(p, _)| p))
                     .unwrap();
                 let layer_img = image::open(chosen)?;
                 let resized = layer_img.resize(px_w, px_h, image::imageops::FilterType::Lanczos3);
@@ -1621,17 +1647,56 @@ impl AssetCatalog {
                 name: format!("ZZZZFlattenedImage-{}.{}.{}-gamut0", scale, 1, 0),
                 identifier: stack_ident,
                 element: car::ELEMENT_UNIVERSAL,
-                part: car::PART_REGULAR,
+                part: car::PART_TVOS_FLATTENED,
                 scale: scale as u16,
                 width: px_w,
                 height: px_h,
                 pixel_data: bgra,
                 pixel_format: pf,
-                layout: car::LAYOUT_ONE_PART_SCALE,
+                layout: 0,
                 idiom: car::idiom_value("tv"),
                 colorspace_id: car::colorspace_for_pixel_format(&pf),
                 min_deploy: self.min_deploy.clone(),
                 platform: self.platform.clone(),
+                template_rendering_intent: 0,
+                ..Rendition::default()
+            });
+
+            // tvOS also expects a pre-blurred "radiosity" image for each scale
+            // that the system composites behind the flattened icon. Dimensions
+            // are 1.2x the icon width and 4/3x the icon height. The radiosity is
+            // derived from the bottom (back) layer only, matching Apple actool.
+            let rad_w = ((base_w * scale) as f32 * 1.2).round() as u32;
+            let rad_h = ((base_h * scale) as f32 * 4.0 / 3.0).round() as u32;
+            let back_files = &layer_files[0].0;
+            let back_path = back_files
+                .iter()
+                .find(|(_, s)| *s == scale)
+                .map(|(p, _)| p)
+                .or_else(|| back_files.first().map(|(p, _)| p))
+                .unwrap();
+            let back_img = image::open(back_path)?;
+            let back_resized = back_img.resize(rad_w, rad_h, image::imageops::FilterType::Lanczos3);
+            let blurred = image::imageops::blur(&back_resized.to_rgba8(), 30.0);
+            let (rad_pixels, _, _, rad_pf) =
+                bgra_to_best_format(rgba_to_bgra(&blurred), rad_w, rad_h, false);
+            renditions.push(Rendition {
+                name: format!("ZZZZRadiosityImage-{}.0.0", scale),
+                identifier: stack_ident,
+                element: car::ELEMENT_UNIVERSAL,
+                part: car::PART_TVOS_RADIOSITY,
+                scale: scale as u16,
+                width: rad_w,
+                height: rad_h,
+                pixel_data: rad_pixels,
+                pixel_format: rad_pf,
+                layout: 0,
+                idiom: car::idiom_value("tv"),
+                colorspace_id: car::colorspace_for_pixel_format(&rad_pf),
+                min_deploy: self.min_deploy.clone(),
+                platform: self.platform.clone(),
+                force_non_opaque: true,
+                template_rendering_intent: 0,
                 ..Rendition::default()
             });
         }

@@ -87,6 +87,8 @@ pub const ELEMENT_PACKED: u16 = 9;
 pub const PART_ICON: u16 = 220;
 pub const PART_ICON_MULTISIZE: u16 = 218;
 pub const PART_REGULAR: u16 = 181;
+pub const PART_TVOS_FLATTENED: u16 = 208;
+pub const PART_TVOS_RADIOSITY: u16 = 209;
 pub const PART_COLOR: u16 = 217;
 pub const PART_SPRITE_ATLAS: u16 = 127;
 // IconComposer (.icon) part IDs observed in Apple's actool output.
@@ -1492,8 +1494,18 @@ impl Rendition {
         }
         let scale_factor = self.scale as u32 * 100;
 
+        let is_tvos_icon =
+            self.part == PART_TVOS_FLATTENED || self.part == PART_TVOS_RADIOSITY;
+
         let mut tlv = Vec::new();
-        if self.layout == LAYOUT_ONE_PART_SCALE {
+        if is_tvos_icon {
+            // tvOS brandasset flattened/radiosity images carry the same slice,
+            // blend, orientation and bytes-per-row TLVs as regular scaled
+            // bitmaps, but omit the metrics TLV that Apple does not emit here.
+            tlv.extend(make_slices_tlv(self.width, self.height));
+            tlv.extend(make_blend_opacity_tlv());
+            tlv.extend(make_exif_orientation_tlv(1));
+        } else if self.layout == LAYOUT_ONE_PART_SCALE {
             tlv.extend(make_slices_tlv(self.width, self.height));
             tlv.extend(make_metrics_tlv(self.width, self.height));
             tlv.extend(make_blend_opacity_tlv());
@@ -1512,8 +1524,11 @@ impl Rendition {
             // and Apple deepmap2's the two large grayscale GA8 icons (speed-dark)
             // that we used to force through KCBC. The `.icon` variant axis is the
             // exception: there Apple uses KCBC for *every* GA8/GA16 (feishin: 0
-            // dmp2), so PART_ICON stays off deepmap2.
+            // dmp2), so PART_ICON stays off deepmap2. tvOS brandasset flattened
+            // and radiosity images also stay off deepmap2; the latter uses the
+            // special "blurred" compression (comp=6) instead.
             let use_dmp2 = self.part != PART_ICON
+                && !is_tvos_icon
                 && (&self.pixel_format == b"BGRA" || &self.pixel_format == b" 8AG");
 
             let mut pixel_data = self.pixel_data.clone();

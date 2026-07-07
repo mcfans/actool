@@ -5,6 +5,7 @@
 //! header/keyformat and partial plist.
 
 use actool::compiler;
+use actool::car;
 use std::path::{Path, PathBuf};
 
 fn workspace_tmp(name: &str) -> PathBuf {
@@ -59,15 +60,25 @@ fn build_tvos_brandassets(root: &Path) {
             r#"{"info":{"author":"xcode","version":1}}"#,
         )
         .unwrap();
-        write_png(&layer.join("Content.imageset").join("Layer.png"),
+        write_png(
+            &layer.join("Content.imageset").join("Layer@1x.png"),
             400,
             240,
+            color,
+        );
+        write_png(
+            &layer.join("Content.imageset").join("Layer@2x.png"),
+            800,
+            480,
             color,
         );
         std::fs::write(
             layer.join("Content.imageset").join("Contents.json"),
             r#"{
-              "images":[{"size":"400x240","idiom":"tv","filename":"Layer.png","scale":"1x"}],
+              "images":[
+                {"size":"400x240","idiom":"tv","filename":"Layer@1x.png","scale":"1x"},
+                {"size":"400x240","idiom":"tv","filename":"Layer@2x.png","scale":"2x"}
+              ],
               "info":{"author":"xcode","version":1}
             }"#,
         )
@@ -156,7 +167,8 @@ fn tvos_brandassets_emits_flattened_and_layer_renditions() {
     let part_col = kf.iter().position(|t| *t == 2).unwrap();
 
     let mut flattened_scales = std::collections::HashSet::new();
-    let mut tv_idiom_count = 0;
+    let mut radiosity_scales = std::collections::HashSet::new();
+    let mut layer_count = 0;
     for i in (0..car.len().saturating_sub(kf.len() * 2)).step_by(2) {
         let c: Vec<u16> = (0..kf.len())
             .map(|x| u16::from_le_bytes(car[i + x * 2..i + x * 2 + 2].try_into().unwrap()))
@@ -164,18 +176,48 @@ fn tvos_brandassets_emits_flattened_and_layer_renditions() {
         if c[0] == 0
             && c[1] == 0
             && c[idiom_col] == 3
-            && c[part_col] == 181
+            && (c[part_col] == car::PART_TVOS_FLATTENED
+                || c[part_col] == car::PART_TVOS_RADIOSITY
+                || c[part_col] == car::PART_REGULAR)
         {
-            tv_idiom_count += 1;
-            if c[scale_col] == 1 || c[scale_col] == 2 {
+            if c[part_col] == car::PART_TVOS_FLATTENED
+                && (c[scale_col] == 1 || c[scale_col] == 2)
+            {
                 flattened_scales.insert(c[scale_col]);
+            }
+            if c[part_col] == car::PART_TVOS_RADIOSITY
+                && (c[scale_col] == 1 || c[scale_col] == 2)
+            {
+                radiosity_scales.insert(c[scale_col]);
+            }
+            if c[part_col] == car::PART_REGULAR {
+                layer_count += 1;
             }
         }
     }
     assert!(
-        tv_idiom_count >= 2,
-        "expected at least two tv-idiom image renditions"
+        flattened_scales.len() >= 1,
+        "expected at least one tv-idiom flattened rendition"
     );
+    assert!(
+        radiosity_scales.len() >= 1,
+        "expected at least one tv-idiom radiosity rendition"
+    );
+    assert!(layer_count >= 2, "expected at least two tv-idiom layer renditions");
     assert!(flattened_scales.contains(&1), "expected 1x flattened rendition");
     assert!(flattened_scales.contains(&2), "expected 2x flattened rendition");
+    assert!(radiosity_scales.contains(&1), "expected 1x radiosity rendition");
+    assert!(radiosity_scales.contains(&2), "expected 2x radiosity rendition");
+
+    // tvOS brand assets also emit pre-blurred radiosity images at each scale.
+    assert!(
+        car.windows("ZZZZRadiosityImage-1.0.0".len())
+            .any(|w| w == b"ZZZZRadiosityImage-1.0.0"),
+        "expected 1x radiosity rendition name"
+    );
+    assert!(
+        car.windows("ZZZZRadiosityImage-2.0.0".len())
+            .any(|w| w == b"ZZZZRadiosityImage-2.0.0"),
+        "expected 2x radiosity rendition name"
+    );
 }
