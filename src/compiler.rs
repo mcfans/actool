@@ -89,6 +89,23 @@ fn resolve_coreui_version(_platform: &str, explicit: Option<u32>) -> u32 {
     972
 }
 
+/// Recursively copy a directory tree, preserving file permissions.
+fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> Result<()> {
+    fs::create_dir_all(&dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let src_path = entry.path();
+        let dst_path = dst.as_ref().join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_all(&src_path, &dst_path)?;
+        } else {
+            fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn compile_catalog(
     xcassets_paths: &[PathBuf],
@@ -117,6 +134,7 @@ pub fn compile_catalog(
     let mut all_locales: HashSet<String> = HashSet::new();
     let mut all_appicon_images: Vec<crate::catalog::IconImage> = Vec::new();
     let mut all_icon_images: Vec<(PathBuf, u32, u32)> = Vec::new();
+    let mut all_tvos_brandassets: Vec<PathBuf> = Vec::new();
 
     for path in xcassets_paths {
         let mut catalog = AssetCatalog::new(
@@ -136,6 +154,7 @@ pub fn compile_catalog(
         all_locales.extend(catalog.get_locales_used());
         all_appicon_images.append(&mut catalog.get_appicon_images()?);
         all_icon_images.append(&mut catalog.get_icon_images()?);
+        all_tvos_brandassets.append(&mut catalog.tvos_brandassets.clone());
     }
 
     // Build a representative catalog object for methods that still need it.
@@ -501,6 +520,22 @@ pub fn compile_catalog(
 
     if produce_car {
         output_files.push(fs::canonicalize(&car_path).unwrap_or(car_path));
+    }
+
+    // tvOS app-icon brandassets must be emitted as a bundle directory in the
+    // compiled output (alongside Assets.car) so the app bundle contains the
+    // Home Screen / App Store icon stacks that App Store Connect validates.
+    if platform == "appletvos" || platform == "appletvsimulator" {
+        for src in &all_tvos_brandassets {
+            let bundle_name = src
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            let dest = output_dir.join(&bundle_name);
+            copy_dir_all(src, &dest)?;
+            output_files.push(fs::canonicalize(&dest).unwrap_or(dest));
+        }
     }
 
     if let Some(path) = info_plist_path {
