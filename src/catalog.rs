@@ -305,6 +305,14 @@ pub struct AssetCatalog {
     /// deployment target is below the `min_jpeg_car_version`.
     /// Entries are `(imageset_stem, source_path)`.
     pub loose_jpegs: Vec<(String, PathBuf)>,
+    /// tvOS `.brandassets` directories whose primary app-icon matches
+    /// `--app-icon`. These bundles must be copied into the compiled output
+    /// so the final app contains the Home Screen / App Store icon stacks.
+    pub tvos_brandassets: Vec<PathBuf>,
+    /// tvOS top-shelf images that must also be emitted as loose files in the
+    /// app bundle root (in addition to being compiled into the CAR) so App
+    /// Store Connect can validate them.
+    pub tvos_top_shelf_images: Vec<(String, PathBuf)>,
     jpeg_in_car: bool,
     /// True when the parsed app icon set uses the Xcode 14+ single-size iOS
     /// format: one 1024x1024 source shared by phone and pad. This affects
@@ -357,6 +365,8 @@ impl AssetCatalog {
             locales_used: HashSet::new(),
             force_bgra,
             loose_jpegs: Vec::new(),
+            tvos_brandassets: Vec::new(),
+            tvos_top_shelf_images: Vec::new(),
             jpeg_in_car,
             single_size_ios_appicon: false,
         }
@@ -1492,8 +1502,44 @@ impl AssetCatalog {
         Ok(())
     }
 
-    /// Parse a tvOS `.brandassets` container. Only the primary app-icon
-    /// imagestack is handled for now; top-shelf images are skipped.
+    /// Find the 1x source image in a tvOS top-shelf imageset, returning the
+    /// imageset name and the source path. ASC validates the loose file named
+    /// after the imageset in the app bundle root.
+    fn find_imageset_1x_source(imageset_path: &Path) -> Option<(String, PathBuf)> {
+        let name = imageset_path
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let contents_path = imageset_path.join("Contents.json");
+        if !contents_path.exists() {
+            return None;
+        }
+        let contents = read_json(&contents_path).ok()?;
+        let images = contents.get("images").and_then(|v| v.as_array())?;
+        for img in images {
+            let scale = img
+                .get("scale")
+                .and_then(|v| v.as_str())
+                .unwrap_or("1x")
+                .trim_end_matches('x')
+                .parse::<u32>()
+                .unwrap_or(1);
+            if scale != 1 {
+                continue;
+            }
+            let filename = img.get("filename").and_then(|v| v.as_str())?;
+            let src = imageset_path.join(filename);
+            if src.exists() {
+                return Some((name, src));
+            }
+        }
+        None
+    }
+
+    /// Parse a tvOS `.brandassets` container. Handles the primary app-icon
+    /// imagestack(s), top-shelf imagesets, and records the bundle path when it
+    /// matches `--app-icon` so the compiler can copy it to the output.
     fn parse_brandassets(
         &mut self,
         item: &Path,
@@ -1511,24 +1557,51 @@ impl AssetCatalog {
         let Some(assets) = contents.get("assets").and_then(|v| v.as_array()) else {
             return Ok(());
         };
+
+        // Record the bundle path when it matches the requested app icon name.
+        let bundle_name = item
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        if self.app_icon.as_ref() == Some(&bundle_name) {
+            self.tvos_brandassets.push(item.to_path_buf());
+        }
+
         for asset in assets {
             let Some(role) = asset.get("role").and_then(|v| v.as_str()) else {
                 continue;
             };
-            if role != "primary-app-icon" {
-                continue;
-            }
             let Some(filename) = asset.get("filename").and_then(|v| v.as_str()) else {
                 continue;
             };
-            let stack_path = item.join(filename);
-            if !stack_path.exists() {
+            let asset_path = item.join(filename);
+            if !asset_path.exists() {
                 continue;
             }
-            // Parse the imagestack layers first so renditions/facets are
-            // registered, then composite a flattened icon on top.
-            self.parse_imagestack(&stack_path, renditions, facets, "")?;
-            self.composite_tvos_iconstack(&stack_path, renditions, facets)?;
+            match role {
+                "primary-app-icon" => {
+                    // Parse the imagestack layers first so renditions/facets are
+                    // registered, then composite a flattened icon on top.
+                    self.parse_imagestack(&asset_path, renditions, facets, "")?;
+                    self.composite_tvos_iconstack(&asset_path, renditions, facets)?;
+                }
+                "top-shelf-image" | "top-shelf-image-wide" => {
+                    // Top-shelf assets are regular imagesets living inside the
+                    // brandassets container; compile them into the CAR.
+                    if asset_path.extension().and_then(|s| s.to_str()) == Some("imageset") {
+                        self.parse_imageset(&asset_path, renditions, facets, "")?;
+                        // App Store Connect validates top-shelf images as loose
+                        // files in the app bundle root, named after the imageset.
+                        if let Some((name, src)) =
+                            Self::find_imageset_1x_source(&asset_path)
+                        {
+                            self.tvos_top_shelf_images.push((name, src));
+                        }
+                    }
+                }
+                _ => {}
+            }
         }
         Ok(())
     }

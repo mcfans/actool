@@ -222,3 +222,103 @@ fn tvos_brandassets_emits_flattened_and_layer_renditions() {
         "expected 2x radiosity rendition name"
     );
 }
+
+#[test]
+fn tvos_brandassets_emits_bundle_directory() {
+    let root = workspace_tmp("tvos_brandassets_bundle");
+    build_tvos_brandassets(&root);
+    let out = root.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    compile_tvos(&root.join("Assets.xcassets"), &out);
+
+    let bundle = out.join("AppIcon.brandassets");
+    assert!(bundle.is_dir(), "brandassets bundle should be emitted");
+    assert!(
+        bundle.join("App Icon.imagestack").is_dir(),
+        "home-screen icon stack should be in emitted bundle"
+    );
+    assert!(
+        bundle.join("Contents.json").is_file(),
+        "brandassets Contents.json should be emitted"
+    );
+}
+
+#[test]
+fn tvos_brandassets_emits_top_shelf_images() {
+    let root = workspace_tmp("tvos_brandassets_topshelf");
+    build_tvos_brandassets(&root);
+
+    // Add top-shelf imagesets inside the brandassets container.
+    let brand = root.join("Assets.xcassets").join("AppIcon.brandassets");
+    let wide = brand.join("Top Shelf Image Wide.imageset");
+    let regular = brand.join("Top Shelf Image.imageset");
+    std::fs::create_dir_all(&wide).unwrap();
+    std::fs::create_dir_all(&regular).unwrap();
+    write_png(&wide.join("wide@1x.png"),
+        2320,
+        720,
+        [0, 0, 255, 255],
+    );
+    write_png(&regular.join("regular@1x.png"),
+        1920,
+        720,
+        [0, 0, 255, 255],
+    );
+    std::fs::write(
+        wide.join("Contents.json"),
+        r#"{
+          "images":[{"size":"2320x720","idiom":"tv","filename":"wide@1x.png","scale":"1x"}],
+          "info":{"author":"xcode","version":1}
+        }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        regular.join("Contents.json"),
+        r#"{
+          "images":[{"size":"1920x720","idiom":"tv","filename":"regular@1x.png","scale":"1x"}],
+          "info":{"author":"xcode","version":1}
+        }"#,
+    )
+    .unwrap();
+
+    // Update the brandassets manifest to reference the top-shelf images.
+    std::fs::write(
+        brand.join("Contents.json"),
+        r#"{
+          "assets":[
+            {"size":"400x240","idiom":"tv","filename":"App Icon.imagestack","role":"primary-app-icon"},
+            {"size":"1920x720","idiom":"tv","filename":"Top Shelf Image.imageset","role":"top-shelf-image"},
+            {"size":"2320x720","idiom":"tv","filename":"Top Shelf Image Wide.imageset","role":"top-shelf-image-wide"}
+          ],
+          "info":{"author":"xcode","version":1}
+        }"#,
+    )
+    .unwrap();
+
+    let out = root.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    compile_tvos(&root.join("Assets.xcassets"), &out);
+
+    // The CAR should contain facets for the top-shelf images.
+    let car = std::fs::read(out.join("Assets.car")).expect("car");
+    assert!(
+        car.windows("Top Shelf Image Wide".len())
+            .any(|w| w == b"Top Shelf Image Wide"),
+        "wide top-shelf facet should be in CAR"
+    );
+    assert!(
+        car.windows("Top Shelf Image".len())
+            .any(|w| w == b"Top Shelf Image"),
+        "regular top-shelf facet should be in CAR"
+    );
+
+    // The emitted bundle should include the top-shelf imagesets.
+    let bundle = out.join("AppIcon.brandassets");
+    assert!(bundle.join("Top Shelf Image Wide.imageset").is_dir());
+    assert!(bundle.join("Top Shelf Image.imageset").is_dir());
+
+    // App Store Connect also validates top-shelf images as loose files in the
+    // app bundle root, named after the imageset.
+    assert!(out.join("Top Shelf Image Wide.png").is_file());
+    assert!(out.join("Top Shelf Image.png").is_file());
+}
